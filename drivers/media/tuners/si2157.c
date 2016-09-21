@@ -165,6 +165,11 @@ static int si2157_init(struct dvb_frontend *fe)
 
 	for (remaining = fw->size; remaining > 0; remaining -= 17) {
 		len = fw->data[fw->size - remaining];
+		if (len > SI2157_ARGLEN) {
+			dev_err(&client->dev, "Bad firmware length\n");
+			ret = -EINVAL;
+			goto err_release_firmware;
+		}
 		memcpy(cmd.args, &fw->data[(fw->size - remaining) + 1], len);
 		cmd.wlen = len;
 		cmd.rlen = 1;
@@ -244,6 +249,7 @@ static int si2157_set_params(struct dvb_frontend *fe)
 	int ret;
 	struct si2157_cmd cmd;
 	u8 bandwidth, delivery_system;
+	u32 if_frequency = 5000000;
 
 	dev_dbg(&client->dev,
 			"delivery_system=%d frequency=%u bandwidth_hz=%u\n",
@@ -266,9 +272,11 @@ static int si2157_set_params(struct dvb_frontend *fe)
 	switch (c->delivery_system) {
 	case SYS_ATSC:
 			delivery_system = 0x00;
+			if_frequency = 3250000;
 			break;
 	case SYS_DVBC_ANNEX_B:
 			delivery_system = 0x10;
+			if_frequency = 4000000;
 			break;
 	case SYS_DVBT:
 	case SYS_DVBT2: /* it seems DVB-T and DVB-T2 both are 0x20 here */
@@ -302,6 +310,20 @@ static int si2157_set_params(struct dvb_frontend *fe)
 	if (ret)
 		goto err;
 
+	/* set if frequency if needed */
+	if (if_frequency != dev->if_frequency) {
+		memcpy(cmd.args, "\x14\x00\x06\x07", 4);
+		cmd.args[4] = (if_frequency / 1000) & 0xff;
+		cmd.args[5] = ((if_frequency / 1000) >> 8) & 0xff;
+		cmd.wlen = 6;
+		cmd.rlen = 4;
+		ret = si2157_cmd_execute(client, &cmd);
+		if (ret)
+			goto err;
+
+		dev->if_frequency = if_frequency;
+	}
+
 	/* set frequency */
 	memcpy(cmd.args, "\x41\x00\x00\x00\x00\x00\x00\x00", 8);
 	cmd.args[4] = (c->frequency >>  0) & 0xff;
@@ -322,14 +344,17 @@ err:
 
 static int si2157_get_if_frequency(struct dvb_frontend *fe, u32 *frequency)
 {
-	*frequency = 5000000; /* default value of property 0x0706 */
+	struct i2c_client *client = fe->tuner_priv;
+	struct si2157_dev *dev = i2c_get_clientdata(client);
+
+	*frequency = dev->if_frequency;
 	return 0;
 }
 
 static const struct dvb_tuner_ops si2157_ops = {
 	.info = {
 		.name           = "Silicon Labs Si2146/2147/2148/2157/2158",
-		.frequency_min  = 110000000,
+		.frequency_min  = 55000000,
 		.frequency_max  = 862000000,
 	},
 
@@ -360,6 +385,7 @@ static int si2157_probe(struct i2c_client *client,
 	dev->inversion = cfg->inversion;
 	dev->fw_loaded = false;
 	dev->chiptype = (u8)id->driver_data;
+	dev->if_frequency = 5000000; /* default value of property 0x0706 */
 	mutex_init(&dev->i2c_mutex);
 
 	/* check if the tuner is there */

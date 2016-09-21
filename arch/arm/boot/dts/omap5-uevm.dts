@@ -20,6 +20,26 @@
 		reg = <0x80000000 0x7F000000>; /* 2032 MB */
 	};
 
+	reserved-memory {
+		#address-cells = <1>;
+		#size-cells = <1>;
+		ranges;
+
+		dsp_cma_pool: dsp_cma@95000000 {
+			compatible = "shared-dma-pool";
+			reg = <0x95000000 0x800000>;
+			reusable;
+			status = "okay";
+		};
+
+		ipu_cma_pool: ipu_cma@95800000 {
+			compatible = "shared-dma-pool";
+			reg = <0x95800000 0x3800000>;
+			reusable;
+			status = "okay";
+		};
+	};
+
 	aliases {
 		display0 = &hdmi0;
 	};
@@ -29,6 +49,24 @@
 		regulator-name = "vmmcsd_fixed";
 		regulator-min-microvolt = <3000000>;
 		regulator-max-microvolt = <3000000>;
+	};
+
+	mmc3_pwrseq: sdhci0_pwrseq {
+		compatible = "mmc-pwrseq-simple";
+		clocks = <&clk32kgaudio>;
+		clock-names = "ext_clock";
+	};
+
+	vmmcsdio_fixed: fixedregulator-mmcsdio {
+		compatible = "regulator-fixed";
+		regulator-name = "vmmcsdio_fixed";
+		regulator-min-microvolt = <1800000>;
+		regulator-max-microvolt = <1800000>;
+		gpio = <&gpio5 12 GPIO_ACTIVE_HIGH>;	/* gpio140 WLAN_EN */
+		enable-active-high;
+		startup-delay-us = <70000>;
+		pinctrl-names = "default";
+		pinctrl-0 = <&wlan_pins>;
 	};
 
 	/* HS USB Host PHY on PORT 2 */
@@ -174,8 +212,8 @@
 
 	i2c5_pins: pinmux_i2c5_pins {
 		pinctrl-single,pins = <
-			0x184 (PIN_INPUT | MUX_MODE0)		/* i2c5_scl */
-			0x186 (PIN_INPUT | MUX_MODE0)		/* i2c5_sda */
+			0x186 (PIN_INPUT | MUX_MODE0)		/* i2c5_scl */
+			0x188 (PIN_INPUT | MUX_MODE0)		/* i2c5_sda */
 		>;
 	};
 
@@ -197,12 +235,20 @@
 		>;
 	};
 
-	mcspi4_pins: pinmux_mcspi4_pins {
+	mmc3_pins: pinmux_mmc3_pins {
 		pinctrl-single,pins = <
-			0x164 (PIN_INPUT | MUX_MODE1)		/*  mcspi4_clk */
-			0x168 (PIN_INPUT | MUX_MODE1)		/*  mcspi4_simo */
-			0x16a (PIN_INPUT | MUX_MODE1)		/*  mcspi4_somi */
-			0x16c (PIN_INPUT | MUX_MODE1)		/*  mcspi4_cs0 */
+			OMAP5_IOPAD(0x01a4, PIN_INPUT_PULLUP | MUX_MODE0) /* wlsdio_clk */
+			OMAP5_IOPAD(0x01a6, PIN_INPUT_PULLUP | MUX_MODE0) /* wlsdio_cmd */
+			OMAP5_IOPAD(0x01a8, PIN_INPUT_PULLUP | MUX_MODE0) /* wlsdio_data0 */
+			OMAP5_IOPAD(0x01aa, PIN_INPUT_PULLUP | MUX_MODE0) /* wlsdio_data1 */
+			OMAP5_IOPAD(0x01ac, PIN_INPUT_PULLUP | MUX_MODE0) /* wlsdio_data2 */
+			OMAP5_IOPAD(0x01ae, PIN_INPUT_PULLUP | MUX_MODE0) /* wlsdio_data3 */
+		>;
+	};
+
+	wlan_pins: pinmux_wlan_pins {
+		pinctrl-single,pins = <
+			OMAP5_IOPAD(0x1bc, PIN_OUTPUT | MUX_MODE6) /* mcspi1_clk.gpio5_140 */
 		>;
 	};
 
@@ -276,6 +322,12 @@
 			0x1A (PIN_OUTPUT | MUX_MODE0) /* fref_clk1_out, USB hub clk */
 		>;
 	};
+
+	wlcore_irq_pin: pinmux_wlcore_irq_pin {
+		pinctrl-single,pins = <
+			OMAP5_IOPAD(0x040, WAKEUP_EN | PIN_INPUT_PULLUP | MUX_MODE6)	/* llia_wakereqin.gpio1_wk14 */
+		>;
+	};
 };
 
 &mmc1 {
@@ -290,8 +342,25 @@
 };
 
 &mmc3 {
+	vmmc-supply = <&vmmcsdio_fixed>;
+	mmc-pwrseq = <&mmc3_pwrseq>;
 	bus-width = <4>;
-	ti,non-removable;
+	non-removable;
+	cap-power-off-card;
+	pinctrl-names = "default";
+	pinctrl-0 = <&mmc3_pins &wlcore_irq_pin>;
+	interrupts-extended = <&gic GIC_SPI 94 IRQ_TYPE_LEVEL_HIGH
+			       &omap5_pmx_core 0x168>;
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+	wlcore: wlcore@2 {
+		compatible = "ti,wl1271";
+		reg = <2>;
+		interrupt-parent = <&gpio1>;
+		interrupts = <14 IRQ_TYPE_LEVEL_HIGH>;	/* gpio 14 */
+		ref-clock-frequency = <26000000>;
+	};
 };
 
 &mmc4 {
@@ -510,6 +579,13 @@
 				};
 			};
 		};
+
+		palmas_power_button: palmas_power_button {
+			compatible = "ti,palmas-pwrbutton";
+			interrupt-parent = <&palmas>;
+			interrupts = <1 IRQ_TYPE_EDGE_FALLING>;
+			wakeup-source;
+		};
 	};
 
 	twl6040: twl@4b {
@@ -591,28 +667,38 @@
 	pinctrl-0 = <&mcspi3_pins>;
 };
 
-&mcspi4 {
-	pinctrl-names = "default";
-	pinctrl-0 = <&mcspi4_pins>;
-};
-
 &uart1 {
-        pinctrl-names = "default";
-        pinctrl-0 = <&uart1_pins>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart1_pins>;
 };
 
 &uart3 {
-        pinctrl-names = "default";
-        pinctrl-0 = <&uart3_pins>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart3_pins>;
+	interrupts-extended = <&wakeupgen GIC_SPI 74 IRQ_TYPE_LEVEL_HIGH>,
+			      <&omap5_pmx_core 0x19c>;
 };
 
 &uart5 {
-        pinctrl-names = "default";
-        pinctrl-0 = <&uart5_pins>;
+	pinctrl-names = "default";
+	pinctrl-0 = <&uart5_pins>;
 };
 
 &cpu0 {
-	cpu0-supply = <&smps123_reg>;
+	cpu0-voltdm = <&voltdm_mpu>;
+	voltage-tolerance = <1>;
+};
+
+&voltdm_mpu {
+	vdd-supply = <&smps123_reg>;
+};
+
+&voltdm_mm {
+	vdd-supply = <&smps45_reg>;
+};
+
+&voltdm_core {
+	vdd-supply = <&smps6_reg>;
 };
 
 &dss {
@@ -631,4 +717,18 @@
 			remote-endpoint = <&tpd12s015_in>;
 		};
 	};
+};
+
+&dsp {
+	status = "okay";
+	memory-region = <&dsp_cma_pool>;
+	timers = <&timer5>;
+	watchdog-timers = <&timer6>;
+};
+
+&ipu {
+	status = "okay";
+	memory-region = <&ipu_cma_pool>;
+	timers = <&timer3>;
+	watchdog-timers = <&timer9>, <&timer11>;
 };

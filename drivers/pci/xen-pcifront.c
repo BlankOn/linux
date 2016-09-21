@@ -52,7 +52,7 @@ struct pcifront_device {
 };
 
 struct pcifront_sd {
-	int domain;
+	struct pci_sysdata sd;
 	struct pcifront_device *pdev;
 };
 
@@ -66,7 +66,9 @@ static inline void pcifront_init_sd(struct pcifront_sd *sd,
 				    unsigned int domain, unsigned int bus,
 				    struct pcifront_device *pdev)
 {
-	sd->domain = domain;
+	/* Because we do not expose that information via XenBus. */
+	sd->sd.node = first_online_node;
+	sd->sd.domain = domain;
 	sd->pdev = pdev;
 }
 
@@ -464,8 +466,8 @@ static int pcifront_scan_root(struct pcifront_device *pdev,
 	dev_info(&pdev->xdev->dev, "Creating PCI Frontend Bus %04x:%02x\n",
 		 domain, bus);
 
-	bus_entry = kmalloc(sizeof(*bus_entry), GFP_KERNEL);
-	sd = kmalloc(sizeof(*sd), GFP_KERNEL);
+	bus_entry = kzalloc(sizeof(*bus_entry), GFP_KERNEL);
+	sd = kzalloc(sizeof(*sd), GFP_KERNEL);
 	if (!bus_entry || !sd) {
 		err = -ENOMEM;
 		goto err_out;
@@ -777,12 +779,13 @@ static int pcifront_publish_info(struct pcifront_device *pdev)
 {
 	int err = 0;
 	struct xenbus_transaction trans;
+	grant_ref_t gref;
 
-	err = xenbus_grant_ring(pdev->xdev, virt_to_mfn(pdev->sh_info));
+	err = xenbus_grant_ring(pdev->xdev, pdev->sh_info, 1, &gref);
 	if (err < 0)
 		goto out;
 
-	pdev->gnt_ref = err;
+	pdev->gnt_ref = gref;
 
 	err = xenbus_alloc_evtchn(pdev->xdev, &pdev->evtchn);
 	if (err)

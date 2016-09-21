@@ -26,6 +26,7 @@
 #include <linux/poll.h>
 #include <linux/mmu_context.h>
 #include <linux/aio.h>
+#include <linux/uio.h>
 
 #include <linux/device.h>
 #include <linux/moduleparam.h>
@@ -344,7 +345,7 @@ ep_io (struct ep_data *epdata, void *buf, unsigned len)
 	spin_unlock_irq (&epdata->dev->lock);
 
 	if (likely (value == 0)) {
-		value = wait_event_interruptible (done.wait, done.done);
+		value = swait_event_interruptible (done.wait, done.done);
 		if (value != 0) {
 			spin_lock_irq (&epdata->dev->lock);
 			if (likely (epdata->ep != NULL)) {
@@ -353,7 +354,7 @@ ep_io (struct ep_data *epdata, void *buf, unsigned len)
 				usb_ep_dequeue (epdata->ep, epdata->req);
 				spin_unlock_irq (&epdata->dev->lock);
 
-				wait_event (done.wait, done.done);
+				swait_event (done.wait, done.done);
 				if (epdata->status == -ECONNRESET)
 					epdata->status = -EINTR;
 			} else {
@@ -469,7 +470,7 @@ static void ep_user_copy_worker(struct work_struct *work)
 		ret = -EFAULT;
 
 	/* completing the iocb can drop the ctx and mm, don't touch mm after */
-	aio_complete(iocb, ret, ret);
+	iocb->ki_complete(iocb, ret, ret);
 
 	kfree(priv->buf);
 	kfree(priv->to_free);
@@ -497,7 +498,8 @@ static void ep_aio_complete(struct usb_ep *ep, struct usb_request *req)
 		kfree(priv);
 		iocb->private = NULL;
 		/* aio_complete() reports bytes-transferred _and_ faults */
-		aio_complete(iocb, req->actual ? req->actual : req->status,
+
+		iocb->ki_complete(iocb, req->actual ? req->actual : req->status,
 				req->status);
 	} else {
 		/* ep_copy_to_user() won't report both; we hide some faults */
@@ -697,8 +699,6 @@ static const struct file_operations ep_io_operations = {
 	.open =		ep_open,
 	.release =	ep_release,
 	.llseek =	no_llseek,
-	.read =		new_sync_read,
-	.write =	new_sync_write,
 	.unlocked_ioctl = ep_ioctl,
 	.read_iter =	ep_read_iter,
 	.write_iter =	ep_write_iter,
@@ -934,8 +934,11 @@ ep0_read (struct file *fd, char __user *buf, size_t len, loff_t *ptr)
 			struct usb_ep		*ep = dev->gadget->ep0;
 			struct usb_request	*req = dev->req;
 
-			if ((retval = setup_req (ep, req, 0)) == 0)
-				retval = usb_ep_queue (ep, req, GFP_ATOMIC);
+			if ((retval = setup_req (ep, req, 0)) == 0) {
+				spin_unlock_irq (&dev->lock);
+				retval = usb_ep_queue (ep, req, GFP_KERNEL);
+				spin_lock_irq (&dev->lock);
+			}
 			dev->state = STATE_DEV_CONNECTED;
 
 			/* assume that was SET_CONFIGURATION */
@@ -1453,8 +1456,11 @@ delegate:
 							w_length);
 				if (value < 0)
 					break;
+
+				spin_unlock (&dev->lock);
 				value = usb_ep_queue (gadget->ep0, dev->req,
-							GFP_ATOMIC);
+							GFP_KERNEL);
+				spin_lock (&dev->lock);
 				if (value < 0) {
 					clean_req (gadget->ep0, dev->req);
 					break;
@@ -1477,11 +1483,14 @@ delegate:
 	if (value >= 0 && dev->state != STATE_DEV_SETUP) {
 		req->length = value;
 		req->zero = value < w_length;
-		value = usb_ep_queue (gadget->ep0, req, GFP_ATOMIC);
+
+		spin_unlock (&dev->lock);
+		value = usb_ep_queue (gadget->ep0, req, GFP_KERNEL);
 		if (value < 0) {
 			DBG (dev, "ep_queue --> %d\n", value);
 			req->status = 0;
 		}
+		return value;
 	}
 
 	/* device stalls when value < 0 */
@@ -1505,7 +1514,7 @@ static void destroy_ep_files (struct dev_data *dev)
 		list_del_init (&ep->epfiles);
 		dentry = ep->dentry;
 		ep->dentry = NULL;
-		parent = dentry->d_parent->d_inode;
+		parent = d_inode(dentry->d_parent);
 
 		/* break link to controller */
 		if (ep->state == STATE_EP_ENABLED)

@@ -31,6 +31,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/genalloc.h>
+#include <linux/platform_data/sram.h>
 
 #define SRAM_GRANULARITY	32
 
@@ -56,6 +57,7 @@ static int sram_reserve_cmp(void *priv, struct list_head *a,
 
 static int sram_probe(struct platform_device *pdev)
 {
+	struct sram_platform_data *pdata = pdev->dev.platform_data;
 	void __iomem *virt_base;
 	struct sram_dev *sram;
 	struct resource *res;
@@ -64,16 +66,36 @@ static int sram_probe(struct platform_device *pdev)
 	struct sram_reserve *rblocks, *block;
 	struct list_head reserve_list;
 	unsigned int nblocks;
+	bool map_exec = false;
 	int ret;
 
 	INIT_LIST_HEAD(&reserve_list);
 
 	res = platform_get_resource(pdev, IORESOURCE_MEM, 0);
-	virt_base = devm_ioremap_resource(&pdev->dev, res);
-	if (IS_ERR(virt_base))
-		return PTR_ERR(virt_base);
+	if (!res) {
+		dev_err(&pdev->dev, "found no memory resource\n");
+		return -EINVAL;
+	}
 
 	size = resource_size(res);
+
+	if (!devm_request_mem_region(&pdev->dev,
+			res->start, size, pdev->name)) {
+		dev_err(&pdev->dev, "could not request region for resource\n");
+		return -EBUSY;
+	}
+
+	if (of_get_property(pdev->dev.of_node, "map-exec", NULL))
+		map_exec = true;
+	if (pdata && pdata->map_exec)
+		map_exec |= true;
+	if (map_exec)
+		virt_base = devm_ioremap_exec(&pdev->dev, res->start, size);
+	else
+		virt_base = devm_ioremap_wc(&pdev->dev, res->start, size);
+
+	if (IS_ERR(virt_base))
+		return PTR_ERR(virt_base);
 
 	sram = devm_kzalloc(&pdev->dev, sizeof(*sram), GFP_KERNEL);
 	if (!sram)
@@ -205,7 +227,7 @@ static int sram_remove(struct platform_device *pdev)
 }
 
 #ifdef CONFIG_OF
-static struct of_device_id sram_dt_ids[] = {
+static const struct of_device_id sram_dt_ids[] = {
 	{ .compatible = "mmio-sram" },
 	{}
 };

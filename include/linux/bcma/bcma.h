@@ -154,6 +154,7 @@ struct bcma_host_ops {
 #define BCMA_CORE_DEFAULT		0xFFF
 
 #define BCMA_MAX_NR_CORES		16
+#define BCMA_CORE_SIZE			0x1000
 
 /* Chip IDs of PCIe devices */
 #define BCMA_CHIP_ID_BCM4313	0x4313
@@ -433,6 +434,27 @@ static inline struct bcma_device *bcma_find_core(struct bcma_bus *bus,
 {
 	return bcma_find_core_unit(bus, coreid, 0);
 }
+
+#ifdef CONFIG_BCMA_HOST_PCI
+extern void bcma_host_pci_up(struct bcma_bus *bus);
+extern void bcma_host_pci_down(struct bcma_bus *bus);
+extern int bcma_host_pci_irq_ctl(struct bcma_bus *bus,
+				 struct bcma_device *core, bool enable);
+#else
+static inline void bcma_host_pci_up(struct bcma_bus *bus)
+{
+}
+static inline void bcma_host_pci_down(struct bcma_bus *bus)
+{
+}
+static inline int bcma_host_pci_irq_ctl(struct bcma_bus *bus,
+					struct bcma_device *core, bool enable)
+{
+	if (bus->hosttype == BCMA_HOSTTYPE_PCI)
+		return -ENOTSUPP;
+	return 0;
+}
+#endif
 
 extern bool bcma_core_is_enabled(struct bcma_device *core);
 extern void bcma_core_disable(struct bcma_device *core, u32 flags);

@@ -38,6 +38,14 @@ static inline int ioremap_page_range(unsigned long addr, unsigned long end,
 }
 #endif
 
+#ifdef CONFIG_HAVE_ARCH_HUGE_VMAP
+void __init ioremap_huge_init(void);
+int arch_ioremap_pud_supported(void);
+int arch_ioremap_pmd_supported(void);
+#else
+static inline void ioremap_huge_init(void) { }
+#endif
+
 /*
  * Managed iomap interface
  */
@@ -64,6 +72,13 @@ void __iomem *devm_ioremap(struct device *dev, resource_size_t offset,
 			   resource_size_t size);
 void __iomem *devm_ioremap_nocache(struct device *dev, resource_size_t offset,
 				   resource_size_t size);
+void __iomem *devm_ioremap_wc(struct device *dev, resource_size_t offset,
+				   resource_size_t size);
+void __iomem *devm_ioremap_exec(struct device *dev, resource_size_t offset,
+				unsigned long size);
+void __iomem *devm_ioremap_exec_nocache(struct device *dev,
+					resource_size_t offset,
+					unsigned long size);
 void devm_iounmap(struct device *dev, void __iomem *addr);
 int check_signature(const volatile void __iomem *io_addr,
 			const unsigned char *signature, int length);

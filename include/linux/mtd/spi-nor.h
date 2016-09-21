@@ -132,6 +132,7 @@ enum spi_nor_option_flags {
  * @mtd:		point to a mtd_info structure
  * @lock:		the lock for the read/write/erase/lock/unlock operations
  * @dev:		point to a spi device, or a spi nor controller device.
+ * @flash_node:		point to a device node describing this flash instance.
  * @page_size:		the page size of the SPI NOR
  * @addr_width:		number of address bytes
  * @erase_opcode:	the opcode for erasing a sector
@@ -155,12 +156,15 @@ enum spi_nor_option_flags {
  * @write:		[DRIVER-SPECIFIC] write data to the SPI NOR
  * @erase:		[DRIVER-SPECIFIC] erase a sector of the SPI NOR
  *			at the offset @offs
+ * @lock:		[FLASH-SPECIFIC] lock a region of the SPI NOR
+ * @unlock:		[FLASH-SPECIFIC] unlock a region of the SPI NOR
  * @priv:		the private data
  */
 struct spi_nor {
 	struct mtd_info		*mtd;
 	struct mutex		lock;
 	struct device		*dev;
+	struct device_node	*flash_node;
 	u32			page_size;
 	u8			addr_width;
 	u8			erase_opcode;
@@ -188,6 +192,9 @@ struct spi_nor {
 	void (*write)(struct spi_nor *nor, loff_t to,
 			size_t len, size_t *retlen, const u_char *write_buf);
 	int (*erase)(struct spi_nor *nor, loff_t offs);
+
+	int (*flash_lock)(struct spi_nor *nor, loff_t ofs, uint64_t len);
+	int (*flash_unlock)(struct spi_nor *nor, loff_t ofs, uint64_t len);
 
 	void *priv;
 };

@@ -678,6 +678,9 @@ static int dn_create(struct net *net, struct socket *sock, int protocol,
 {
 	struct sock *sk;
 
+	if (protocol < 0 || protocol > SK_PROTOCOL_MAX)
+		return -EINVAL;
+
 	if (!net_eq(net, &init_net))
 		return -EAFNOSUPPORT;
 
@@ -1669,8 +1672,8 @@ static int dn_data_ready(struct sock *sk, struct sk_buff_head *q, int flags, int
 }
 
 
-static int dn_recvmsg(struct kiocb *iocb, struct socket *sock,
-	struct msghdr *msg, size_t size, int flags)
+static int dn_recvmsg(struct socket *sock, struct msghdr *msg, size_t size,
+		      int flags)
 {
 	struct sock *sk = sock->sk;
 	struct dn_scp *scp = DN_SK(sk);
@@ -1905,8 +1908,7 @@ static inline struct sk_buff *dn_alloc_send_pskb(struct sock *sk,
 	return skb;
 }
 
-static int dn_sendmsg(struct kiocb *iocb, struct socket *sock,
-		      struct msghdr *msg, size_t size)
+static int dn_sendmsg(struct socket *sock, struct msghdr *msg, size_t size)
 {
 	struct sock *sk = sock->sk;
 	struct dn_scp *scp = DN_SK(sk);

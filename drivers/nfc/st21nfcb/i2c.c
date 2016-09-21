@@ -87,11 +87,6 @@ static void st21nfcb_nci_i2c_disable(void *phy_id)
 	gpio_set_value(phy->gpio_reset, 1);
 }
 
-static void st21nfcb_nci_remove_header(struct sk_buff *skb)
-{
-	skb_pull(skb, ST21NFCB_FRAME_HEADROOM);
-}
-
 /*
  * Writing a frame must not return the number of written bytes.
  * It must return either zero for success, or <0 for error.
@@ -109,7 +104,7 @@ static int st21nfcb_nci_i2c_write(void *phy_id, struct sk_buff *skb)
 		return phy->ndlc->hard_fault;
 
 	r = i2c_master_send(client, skb->data, skb->len);
-	if (r == -EREMOTEIO) {  /* Retry, chip was in standby */
+	if (r < 0) {  /* Retry, chip was in standby */
 		usleep_range(1000, 4000);
 		r = i2c_master_send(client, skb->data, skb->len);
 	}
@@ -120,8 +115,6 @@ static int st21nfcb_nci_i2c_write(void *phy_id, struct sk_buff *skb)
 		else
 			r = 0;
 	}
-
-	st21nfcb_nci_remove_header(skb);
 
 	return r;
 }
@@ -148,7 +141,7 @@ static int st21nfcb_nci_i2c_read(struct st21nfcb_i2c_phy *phy,
 	struct i2c_client *client = phy->i2c_dev;
 
 	r = i2c_master_recv(client, buf, ST21NFCB_NCI_I2C_MIN_SIZE);
-	if (r == -EREMOTEIO) {  /* Retry, chip was in standby */
+	if (r < 0) {  /* Retry, chip was in standby */
 		usleep_range(1000, 4000);
 		r = i2c_master_recv(client, buf, ST21NFCB_NCI_I2C_MIN_SIZE);
 	}
@@ -313,11 +306,8 @@ static int st21nfcb_nci_i2c_probe(struct i2c_client *client,
 
 	phy = devm_kzalloc(&client->dev, sizeof(struct st21nfcb_i2c_phy),
 			   GFP_KERNEL);
-	if (!phy) {
-		nfc_err(&client->dev,
-			"Cannot allocate memory for st21nfcb i2c phy.\n");
+	if (!phy)
 		return -ENOMEM;
-	}
 
 	phy->i2c_dev = client;
 
@@ -368,9 +358,6 @@ static int st21nfcb_nci_i2c_remove(struct i2c_client *client)
 	dev_dbg(&client->dev, "%s\n", __func__);
 
 	ndlc_remove(phy->ndlc);
-
-	if (phy->powered)
-		st21nfcb_nci_i2c_disable(phy);
 
 	return 0;
 }

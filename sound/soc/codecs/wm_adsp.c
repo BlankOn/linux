@@ -248,7 +248,7 @@ static int wm_adsp_fw_get(struct snd_kcontrol *kcontrol,
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	struct wm_adsp *adsp = snd_soc_codec_get_drvdata(codec);
 
-	ucontrol->value.integer.value[0] = adsp[e->shift_l].fw;
+	ucontrol->value.enumerated.item[0] = adsp[e->shift_l].fw;
 
 	return 0;
 }
@@ -260,16 +260,16 @@ static int wm_adsp_fw_put(struct snd_kcontrol *kcontrol,
 	struct soc_enum *e = (struct soc_enum *)kcontrol->private_value;
 	struct wm_adsp *adsp = snd_soc_codec_get_drvdata(codec);
 
-	if (ucontrol->value.integer.value[0] == adsp[e->shift_l].fw)
+	if (ucontrol->value.enumerated.item[0] == adsp[e->shift_l].fw)
 		return 0;
 
-	if (ucontrol->value.integer.value[0] >= WM_ADSP_NUM_FW)
+	if (ucontrol->value.enumerated.item[0] >= WM_ADSP_NUM_FW)
 		return -EINVAL;
 
 	if (adsp[e->shift_l].running)
 		return -EBUSY;
 
-	adsp[e->shift_l].fw = ucontrol->value.integer.value[0];
+	adsp[e->shift_l].fw = ucontrol->value.enumerated.item[0];
 
 	return 0;
 }
@@ -420,10 +420,9 @@ static int wm_coeff_put(struct snd_kcontrol *kcontrol,
 
 	memcpy(ctl->cache, p, ctl->len);
 
-	if (!ctl->enabled) {
-		ctl->set = 1;
+	ctl->set = 1;
+	if (!ctl->enabled)
 		return 0;
-	}
 
 	return wm_coeff_write_control(kcontrol, p, ctl->len);
 }
@@ -1185,7 +1184,6 @@ static int wm_adsp_load_coeff(struct wm_adsp *dsp)
 	int ret, pos, blocks, type, offset, reg;
 	char *file;
 	struct wm_adsp_buf *buf;
-	int tmp;
 
 	file = kzalloc(PAGE_SIZE, GFP_KERNEL);
 	if (file == NULL)
@@ -1335,12 +1333,7 @@ static int wm_adsp_load_coeff(struct wm_adsp *dsp)
 			}
 		}
 
-		tmp = le32_to_cpu(blk->len) % 4;
-		if (tmp)
-			pos += le32_to_cpu(blk->len) + (4 - tmp) + sizeof(*blk);
-		else
-			pos += le32_to_cpu(blk->len) + sizeof(*blk);
-
+		pos += (le32_to_cpu(blk->len) + sizeof(*blk) + 3) & ~0x03;
 		blocks++;
 	}
 

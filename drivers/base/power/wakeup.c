@@ -14,6 +14,7 @@
 #include <linux/suspend.h>
 #include <linux/seq_file.h>
 #include <linux/debugfs.h>
+#include <linux/pm_wakeirq.h>
 #include <trace/events/power.h>
 
 #include "power.h"
@@ -237,6 +238,97 @@ int device_wakeup_enable(struct device *dev)
 	return ret;
 }
 EXPORT_SYMBOL_GPL(device_wakeup_enable);
+
+/**
+ * device_wakeup_attach_irq - Attach a wakeirq to a wakeup source
+ * @dev: Device to handle
+ * @wakeirq: Device specific wakeirq entry
+ *
+ * Attach a device wakeirq to the wakeup source so the device
+ * wake IRQ can be configured automatically for suspend and
+ * resume.
+ */
+int device_wakeup_attach_irq(struct device *dev,
+			     struct wake_irq *wakeirq)
+{
+	struct wakeup_source *ws;
+	int ret = 0;
+
+	spin_lock_irq(&dev->power.lock);
+	ws = dev->power.wakeup;
+	if (!ws) {
+		dev_err(dev, "forgot to call call device_init_wakeup?\n");
+		ret = -EINVAL;
+		goto unlock;
+	}
+
+	if (ws->wakeirq) {
+		ret = -EEXIST;
+		goto unlock;
+	}
+
+	ws->wakeirq = wakeirq;
+
+unlock:
+	spin_unlock_irq(&dev->power.lock);
+
+	return ret;
+}
+
+/**
+ * device_wakeup_detach_irq - Detach a wakeirq from a wakeup source
+ * @dev: Device to handle
+ *
+ * Removes a device wakeirq from the wakeup source.
+ */
+void device_wakeup_detach_irq(struct device *dev)
+{
+	struct wakeup_source *ws;
+
+	spin_lock_irq(&dev->power.lock);
+	ws = dev->power.wakeup;
+	if (!ws)
+		goto unlock;
+
+	ws->wakeirq = NULL;
+
+unlock:
+	spin_unlock_irq(&dev->power.lock);
+}
+
+/**
+ * device_wakeup_arm_wake_irqs(void)
+ *
+ * Itereates over the list of device wakeirqs to arm them.
+ */
+void device_wakeup_arm_wake_irqs(void)
+{
+	struct wakeup_source *ws;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
+		if (ws->wakeirq)
+			dev_pm_arm_wake_irq(ws->wakeirq);
+	}
+	rcu_read_unlock();
+}
+
+/**
+ * device_wakeup_disarm_wake_irqs(void)
+ *
+ * Itereates over the list of device wakeirqs to disarm them.
+ */
+void device_wakeup_disarm_wake_irqs(void)
+{
+	struct wakeup_source *ws;
+
+	rcu_read_lock();
+	list_for_each_entry_rcu(ws, &wakeup_sources, entry) {
+		if (ws->wakeirq)
+			dev_pm_disarm_wake_irq(ws->wakeirq);
+	}
+	rcu_read_unlock();
+}
 
 /**
  * device_wakeup_detach - Detach a device's wakeup source object from it.
@@ -843,7 +935,6 @@ static int print_wakeup_source_stats(struct seq_file *m,
 	unsigned long active_count;
 	ktime_t active_time;
 	ktime_t prevent_sleep_time;
-	int ret;
 
 	spin_lock_irqsave(&ws->lock, flags);
 
@@ -866,17 +957,16 @@ static int print_wakeup_source_stats(struct seq_file *m,
 		active_time = ktime_set(0, 0);
 	}
 
-	ret = seq_printf(m, "%-12s\t%lu\t\t%lu\t\t%lu\t\t%lu\t\t"
-			"%lld\t\t%lld\t\t%lld\t\t%lld\t\t%lld\n",
-			ws->name, active_count, ws->event_count,
-			ws->wakeup_count, ws->expire_count,
-			ktime_to_ms(active_time), ktime_to_ms(total_time),
-			ktime_to_ms(max_time), ktime_to_ms(ws->last_time),
-			ktime_to_ms(prevent_sleep_time));
+	seq_printf(m, "%-12s\t%lu\t\t%lu\t\t%lu\t\t%lu\t\t%lld\t\t%lld\t\t%lld\t\t%lld\t\t%lld\n",
+		   ws->name, active_count, ws->event_count,
+		   ws->wakeup_count, ws->expire_count,
+		   ktime_to_ms(active_time), ktime_to_ms(total_time),
+		   ktime_to_ms(max_time), ktime_to_ms(ws->last_time),
+		   ktime_to_ms(prevent_sleep_time));
 
 	spin_unlock_irqrestore(&ws->lock, flags);
 
-	return ret;
+	return 0;
 }
 
 /**

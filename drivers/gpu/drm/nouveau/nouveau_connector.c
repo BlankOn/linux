@@ -309,7 +309,7 @@ detect_analog:
 		nv_encoder = find_encoder(connector, DCB_OUTPUT_TV);
 	if (nv_encoder && force) {
 		struct drm_encoder *encoder = to_drm_encoder(nv_encoder);
-		struct drm_encoder_helper_funcs *helper =
+		const struct drm_encoder_helper_funcs *helper =
 						encoder->helper_private;
 
 		if (helper->detect(encoder, connector) ==
@@ -592,7 +592,7 @@ nouveau_connector_set_property(struct drm_connector *connector,
 static struct drm_display_mode *
 nouveau_connector_native_mode(struct drm_connector *connector)
 {
-	struct drm_connector_helper_funcs *helper = connector->helper_private;
+	const struct drm_connector_helper_funcs *helper = connector->helper_private;
 	struct nouveau_drm *drm = nouveau_drm(connector->dev);
 	struct nouveau_connector *nv_connector = nouveau_connector(connector);
 	struct drm_device *dev = connector->dev;
@@ -969,10 +969,13 @@ nouveau_connector_hotplug(struct nvif_notify *notify)
 
 		NV_DEBUG(drm, "%splugged %s\n", plugged ? "" : "un", name);
 
+		mutex_lock(&drm->dev->mode_config.mutex);
 		if (plugged)
 			drm_helper_connector_dpms(connector, DRM_MODE_DPMS_ON);
 		else
 			drm_helper_connector_dpms(connector, DRM_MODE_DPMS_OFF);
+		mutex_unlock(&drm->dev->mode_config.mutex);
+
 		drm_helper_hpd_irq_event(connector->dev);
 	}
 

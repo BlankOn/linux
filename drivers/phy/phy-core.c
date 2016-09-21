@@ -275,20 +275,21 @@ EXPORT_SYMBOL_GPL(phy_exit);
 
 int phy_power_on(struct phy *phy)
 {
-	int ret;
+	int ret = 0;
 
 	if (!phy)
-		return 0;
+		goto out;
 
 	if (phy->pwr) {
 		ret = regulator_enable(phy->pwr);
 		if (ret)
-			return ret;
+			goto out;
 	}
 
 	ret = phy_pm_runtime_get_sync(phy);
 	if (ret < 0 && ret != -ENOTSUPP)
-		return ret;
+		goto err_pm_sync;
+
 	ret = 0; /* Override possible ret == -ENOTSUPP */
 
 	mutex_lock(&phy->mutex);
@@ -296,19 +297,20 @@ int phy_power_on(struct phy *phy)
 		ret = phy->ops->power_on(phy);
 		if (ret < 0) {
 			dev_err(&phy->dev, "phy poweron failed --> %d\n", ret);
-			goto out;
+			goto err_pwr_on;
 		}
 	}
 	++phy->power_count;
 	mutex_unlock(&phy->mutex);
 	return 0;
 
-out:
+err_pwr_on:
 	mutex_unlock(&phy->mutex);
 	phy_pm_runtime_put_sync(phy);
+err_pm_sync:
 	if (phy->pwr)
 		regulator_disable(phy->pwr);
-
+out:
 	return ret;
 }
 EXPORT_SYMBOL_GPL(phy_power_on);
@@ -530,7 +532,7 @@ struct phy *phy_optional_get(struct device *dev, const char *string)
 {
 	struct phy *phy = phy_get(dev, string);
 
-	if (PTR_ERR(phy) == -ENODEV)
+	if (IS_ERR(phy) && (PTR_ERR(phy) == -ENODEV))
 		phy = NULL;
 
 	return phy;
@@ -584,7 +586,7 @@ struct phy *devm_phy_optional_get(struct device *dev, const char *string)
 {
 	struct phy *phy = devm_phy_get(dev, string);
 
-	if (PTR_ERR(phy) == -ENODEV)
+	if (IS_ERR(phy) && (PTR_ERR(phy) == -ENODEV))
 		phy = NULL;
 
 	return phy;
@@ -621,6 +623,38 @@ struct phy *devm_of_phy_get(struct device *dev, struct device_node *np,
 	return phy;
 }
 EXPORT_SYMBOL_GPL(devm_of_phy_get);
+
+/**
+ * devm_of_phy_get_by_index() - lookup and obtain a reference to a phy by index.
+ * @dev: device that requests this phy
+ * @np: node containing the phy
+ * @index: index of the phy
+ *
+ * Gets the phy using _of_phy_get(), and associates a device with it using
+ * devres. On driver detach, release function is invoked on the devres data,
+ * then, devres data is freed.
+ *
+ */
+struct phy *devm_of_phy_get_by_index(struct device *dev, struct device_node *np,
+				     int index)
+{
+	struct phy **ptr, *phy;
+
+	ptr = devres_alloc(devm_phy_release, sizeof(*ptr), GFP_KERNEL);
+	if (!ptr)
+		return ERR_PTR(-ENOMEM);
+
+	phy = _of_phy_get(np, index);
+	if (!IS_ERR(phy)) {
+		*ptr = phy;
+		devres_add(dev, ptr);
+	} else {
+		devres_free(ptr);
+	}
+
+	return phy;
+}
+EXPORT_SYMBOL_GPL(devm_of_phy_get_by_index);
 
 /**
  * phy_create() - create a new phy

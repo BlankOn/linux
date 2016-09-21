@@ -342,7 +342,7 @@ static int ip_frag_queue(struct ipq *qp, struct sk_buff *skb)
 	ihl = ip_hdrlen(skb);
 
 	/* Determine the position of this fragment. */
-	end = offset + skb->len - ihl;
+	end = offset + skb->len - skb_network_offset(skb) - ihl;
 	err = -EINVAL;
 
 	/* Is this the final fragment? */
@@ -372,7 +372,7 @@ static int ip_frag_queue(struct ipq *qp, struct sk_buff *skb)
 		goto err;
 
 	err = -ENOMEM;
-	if (pskb_pull(skb, ihl) == NULL)
+	if (!pskb_pull(skb, skb_network_offset(skb) + ihl))
 		goto err;
 
 	err = pskb_trim_rcsum(skb, end - offset);
@@ -537,7 +537,7 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *prev,
 		qp->q.fragments = head;
 	}
 
-	WARN_ON(head == NULL);
+	WARN_ON(!head);
 	WARN_ON(FRAG_CB(head)->offset != 0);
 
 	/* Allocate a new buffer for the datagram. */
@@ -559,7 +559,8 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *prev,
 		struct sk_buff *clone;
 		int i, plen = 0;
 
-		if ((clone = alloc_skb(0, GFP_ATOMIC)) == NULL)
+		clone = alloc_skb(0, GFP_ATOMIC);
+		if (!clone)
 			goto out_nomem;
 		clone->next = head->next;
 		head->next = clone;
@@ -612,6 +613,9 @@ static int ip_frag_reasm(struct ipq *qp, struct sk_buff *prev,
 	iph->frag_off = qp->q.max_size ? htons(IP_DF) : 0;
 	iph->tot_len = htons(len);
 	iph->tos |= ecn;
+
+	ip_send_check(iph);
+
 	IP_INC_STATS_BH(net, IPSTATS_MIB_REASMOKS);
 	qp->q.fragments = NULL;
 	qp->q.fragments_tail = NULL;
@@ -638,7 +642,8 @@ int ip_defrag(struct sk_buff *skb, u32 user)
 	IP_INC_STATS_BH(net, IPSTATS_MIB_REASMREQDS);
 
 	/* Lookup (or create) queue header */
-	if ((qp = ip_find(net, ip_hdr(skb), user)) != NULL) {
+	qp = ip_find(net, ip_hdr(skb), user);
+	if (qp) {
 		int ret;
 
 		spin_lock(&qp->q.lock);
@@ -754,7 +759,7 @@ static int __net_init ip4_frags_ns_ctl_register(struct net *net)
 	table = ip4_frags_ns_ctl_table;
 	if (!net_eq(net, &init_net)) {
 		table = kmemdup(table, sizeof(ip4_frags_ns_ctl_table), GFP_KERNEL);
-		if (table == NULL)
+		if (!table)
 			goto err_alloc;
 
 		table[0].data = &net->ipv4.frags.high_thresh;
@@ -770,7 +775,7 @@ static int __net_init ip4_frags_ns_ctl_register(struct net *net)
 	}
 
 	hdr = register_net_sysctl(net, "net/ipv4", table);
-	if (hdr == NULL)
+	if (!hdr)
 		goto err_reg;
 
 	net->ipv4.frags_hdr = hdr;

@@ -875,13 +875,13 @@ no_timer:
 
 void kvm_s390_vcpu_wakeup(struct kvm_vcpu *vcpu)
 {
-	if (waitqueue_active(&vcpu->wq)) {
+	if (swaitqueue_active(&vcpu->wq)) {
 		/*
 		 * The vcpu gave up the cpu voluntarily, mark it as a good
 		 * yield-candidate.
 		 */
 		vcpu->preempted = true;
-		wake_up_interruptible(&vcpu->wq);
+		swait_wake_interruptible(&vcpu->wq);
 		vcpu->stat.halt_wakeup++;
 	}
 }
@@ -987,7 +987,7 @@ int kvm_s390_inject_program_int(struct kvm_vcpu *vcpu, u16 code)
 	spin_lock(&li->lock);
 	irq.u.pgm.code = code;
 	__inject_prog(vcpu, &irq);
-	BUG_ON(waitqueue_active(li->wq));
+	BUG_ON(swaitqueue_active(li->wq));
 	spin_unlock(&li->lock);
 	return 0;
 }
@@ -1006,7 +1006,7 @@ int kvm_s390_inject_prog_irq(struct kvm_vcpu *vcpu,
 	spin_lock(&li->lock);
 	irq.u.pgm = *pgm_info;
 	rc = __inject_prog(vcpu, &irq);
-	BUG_ON(waitqueue_active(li->wq));
+	BUG_ON(swaitqueue_active(li->wq));
 	spin_unlock(&li->lock);
 	return rc;
 }
@@ -1054,14 +1054,13 @@ static int __inject_extcall(struct kvm_vcpu *vcpu, struct kvm_s390_irq *irq)
 				   src_id, 0, 2);
 
 	/* sending vcpu invalid */
-	if (src_id >= KVM_MAX_VCPUS ||
-	    kvm_get_vcpu(vcpu->kvm, src_id) == NULL)
+	if (kvm_get_vcpu_by_id(vcpu->kvm, src_id) == NULL)
 		return -EINVAL;
 
 	if (sclp_has_sigpif())
 		return __inject_extcall_sigpif(vcpu, src_id);
 
-	if (!test_and_set_bit(IRQ_PEND_EXT_EXTERNAL, &li->pending_irqs))
+	if (test_and_set_bit(IRQ_PEND_EXT_EXTERNAL, &li->pending_irqs))
 		return -EBUSY;
 	*extcall = irq->u.extcall;
 	atomic_set_mask(CPUSTAT_EXT_INT, li->cpuflags);
@@ -1133,6 +1132,10 @@ static int __inject_sigp_emergency(struct kvm_vcpu *vcpu,
 		   irq->u.emerg.code);
 	trace_kvm_s390_inject_vcpu(vcpu->vcpu_id, KVM_S390_INT_EMERGENCY,
 				   irq->u.emerg.code, 0, 2);
+
+	/* sending vcpu invalid */
+	if (kvm_get_vcpu_by_id(vcpu->kvm, irq->u.emerg.code) == NULL)
+		return -EINVAL;
 
 	set_bit(irq->u.emerg.code, li->sigp_emerg_pending);
 	set_bit(IRQ_PEND_EXT_EMERGENCY, &li->pending_irqs);
@@ -1606,6 +1609,9 @@ void kvm_s390_clear_float_irqs(struct kvm *kvm)
 	int i;
 
 	spin_lock(&fi->lock);
+	fi->pending_irqs = 0;
+	memset(&fi->srv_signal, 0, sizeof(fi->srv_signal));
+	memset(&fi->mchk, 0, sizeof(fi->mchk));
 	for (i = 0; i < FIRQ_LIST_COUNT; i++)
 		clear_irq_list(&fi->lists[i]);
 	for (i = 0; i < FIRQ_MAX_COUNT; i++)

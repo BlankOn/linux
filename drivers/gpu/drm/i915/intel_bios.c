@@ -41,7 +41,7 @@ find_section(struct bdb_header *bdb, int section_id)
 {
 	u8 *base = (u8 *)bdb;
 	int index = 0;
-	u16 total, current_size;
+	u32 total, current_size;
 	u8 current_id;
 
 	/* skip to first section */
@@ -55,6 +55,10 @@ find_section(struct bdb_header *bdb, int section_id)
 
 		current_size = *((u16 *)(base + index));
 		index += 2;
+
+		/* The MIPI Sequence Block v3+ has a separate size field. */
+		if (current_id == BDB_MIPI_SEQUENCE && *(base + index) >= 3)
+			current_size = *((const u32 *)(base + index + 1));
 
 		if (index + current_size > total)
 			return NULL;
@@ -662,6 +666,13 @@ parse_edp(struct drm_i915_private *dev_priv, struct bdb_header *bdb)
 			      edp_link_params->vswing);
 		break;
 	}
+
+	if (bdb->version >= 173) {
+		uint8_t vswing;
+
+		vswing = (edp->edp_vswing_preemph >> (panel_type * 4)) & 0xF;
+		dev_priv->vbt.edp_low_vswing = vswing == 0;
+	}
 }
 
 static void
@@ -835,6 +846,12 @@ parse_mipi(struct drm_i915_private *dev_priv, struct bdb_header *bdb)
 	sequence = find_section(bdb, BDB_MIPI_SEQUENCE);
 	if (!sequence) {
 		DRM_DEBUG_KMS("No MIPI Sequence found, parsing complete\n");
+		return;
+	}
+
+	/* Fail gracefully for forward incompatible sequence block. */
+	if (sequence->version >= 3) {
+		DRM_ERROR("Unable to parse MIPI Sequence Block v3+\n");
 		return;
 	}
 

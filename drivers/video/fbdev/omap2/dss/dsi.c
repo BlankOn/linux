@@ -40,6 +40,7 @@
 #include <linux/pm_runtime.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
+#include <linux/component.h>
 
 #include <video/omapdss.h>
 #include <video/mipi_display.h>
@@ -213,9 +214,9 @@ struct dsi_reg { u16 module; u16 idx; };
 typedef void (*omap_dsi_isr_t) (void *arg, u32 mask);
 
 static int dsi_display_init_dispc(struct platform_device *dsidev,
-	struct omap_overlay_manager *mgr);
+	enum omap_channel channel);
 static void dsi_display_uninit_dispc(struct platform_device *dsidev,
-	struct omap_overlay_manager *mgr);
+	enum omap_channel channel);
 
 static int dsi_vc_send_null(struct omap_dss_device *dssdev, int channel);
 
@@ -526,7 +527,7 @@ static inline int wait_for_bit_change(struct platform_device *dsidev,
 	return !value;
 }
 
-u8 dsi_get_pixel_size(enum omap_dss_dsi_pixel_format fmt)
+static u8 dsi_get_pixel_size(enum omap_dss_dsi_pixel_format fmt)
 {
 	switch (fmt) {
 	case OMAP_DSS_DSI_FMT_RGB888:
@@ -3825,19 +3826,19 @@ static int dsi_enable_video_output(struct omap_dss_device *dssdev, int channel)
 {
 	struct platform_device *dsidev = dsi_get_dsidev_from_dssdev(dssdev);
 	struct dsi_data *dsi = dsi_get_dsidrv_data(dsidev);
-	struct omap_overlay_manager *mgr = dsi->output.manager;
+	enum omap_channel dispc_channel = dssdev->dispc_channel;
 	int bpp = dsi_get_pixel_size(dsi->pix_fmt);
 	struct omap_dss_device *out = &dsi->output;
 	u8 data_type;
 	u16 word_count;
 	int r;
 
-	if (out == NULL || out->manager == NULL) {
+	if (!out->dispc_channel_connected) {
 		DSSERR("failed to enable display: no output/manager\n");
 		return -ENODEV;
 	}
 
-	r = dsi_display_init_dispc(dsidev, mgr);
+	r = dsi_display_init_dispc(dsidev, dispc_channel);
 	if (r)
 		goto err_init_dispc;
 
@@ -3875,7 +3876,7 @@ static int dsi_enable_video_output(struct omap_dss_device *dssdev, int channel)
 		dsi_if_enable(dsidev, true);
 	}
 
-	r = dss_mgr_enable(mgr);
+	r = dss_mgr_enable(dispc_channel);
 	if (r)
 		goto err_mgr_enable;
 
@@ -3887,7 +3888,7 @@ err_mgr_enable:
 		dsi_vc_enable(dsidev, channel, false);
 	}
 err_pix_fmt:
-	dsi_display_uninit_dispc(dsidev, mgr);
+	dsi_display_uninit_dispc(dsidev, dispc_channel);
 err_init_dispc:
 	return r;
 }
@@ -3896,7 +3897,7 @@ static void dsi_disable_video_output(struct omap_dss_device *dssdev, int channel
 {
 	struct platform_device *dsidev = dsi_get_dsidev_from_dssdev(dssdev);
 	struct dsi_data *dsi = dsi_get_dsidrv_data(dsidev);
-	struct omap_overlay_manager *mgr = dsi->output.manager;
+	enum omap_channel dispc_channel = dssdev->dispc_channel;
 
 	if (dsi->mode == OMAP_DSS_DSI_VIDEO_MODE) {
 		dsi_if_enable(dsidev, false);
@@ -3909,15 +3910,15 @@ static void dsi_disable_video_output(struct omap_dss_device *dssdev, int channel
 		dsi_if_enable(dsidev, true);
 	}
 
-	dss_mgr_disable(mgr);
+	dss_mgr_disable(dispc_channel);
 
-	dsi_display_uninit_dispc(dsidev, mgr);
+	dsi_display_uninit_dispc(dsidev, dispc_channel);
 }
 
 static void dsi_update_screen_dispc(struct platform_device *dsidev)
 {
 	struct dsi_data *dsi = dsi_get_dsidrv_data(dsidev);
-	struct omap_overlay_manager *mgr = dsi->output.manager;
+	enum omap_channel dispc_channel = dsi->output.dispc_channel;
 	unsigned bytespp;
 	unsigned bytespl;
 	unsigned bytespf;
@@ -3979,9 +3980,9 @@ static void dsi_update_screen_dispc(struct platform_device *dsidev)
 		msecs_to_jiffies(250));
 	BUG_ON(r == 0);
 
-	dss_mgr_set_timings(mgr, &dsi->timings);
+	dss_mgr_set_timings(dispc_channel, &dsi->timings);
 
-	dss_mgr_start_update(mgr);
+	dss_mgr_start_update(dispc_channel);
 
 	if (dsi->te_enabled) {
 		/* disable LP_RX_TO, so that we can receive TE.  Time to wait
@@ -4104,17 +4105,17 @@ static int dsi_configure_dispc_clocks(struct platform_device *dsidev)
 }
 
 static int dsi_display_init_dispc(struct platform_device *dsidev,
-		struct omap_overlay_manager *mgr)
+		enum omap_channel channel)
 {
 	struct dsi_data *dsi = dsi_get_dsidrv_data(dsidev);
 	int r;
 
-	dss_select_lcd_clk_source(mgr->id, dsi->module_id == 0 ?
+	dss_select_lcd_clk_source(channel, dsi->module_id == 0 ?
 			OMAP_DSS_CLK_SRC_DSI_PLL_HSDIV_DISPC :
 			OMAP_DSS_CLK_SRC_DSI2_PLL_HSDIV_DISPC);
 
 	if (dsi->mode == OMAP_DSS_DSI_CMD_MODE) {
-		r = dss_mgr_register_framedone_handler(mgr,
+		r = dss_mgr_register_framedone_handler(channel,
 				dsi_framedone_irq_callback, dsidev);
 		if (r) {
 			DSSERR("can't register FRAMEDONE handler\n");
@@ -4137,9 +4138,9 @@ static int dsi_display_init_dispc(struct platform_device *dsidev,
 	dsi->timings.vsync_level = OMAPDSS_SIG_ACTIVE_HIGH;
 	dsi->timings.data_pclk_edge = OMAPDSS_DRIVE_SIG_RISING_EDGE;
 	dsi->timings.de_level = OMAPDSS_SIG_ACTIVE_HIGH;
-	dsi->timings.sync_pclk_edge = OMAPDSS_DRIVE_SIG_OPPOSITE_EDGES;
+	dsi->timings.sync_pclk_edge = OMAPDSS_DRIVE_SIG_FALLING_EDGE;
 
-	dss_mgr_set_timings(mgr, &dsi->timings);
+	dss_mgr_set_timings(channel, &dsi->timings);
 
 	r = dsi_configure_dispc_clocks(dsidev);
 	if (r)
@@ -4150,28 +4151,28 @@ static int dsi_display_init_dispc(struct platform_device *dsidev,
 			dsi_get_pixel_size(dsi->pix_fmt);
 	dsi->mgr_config.lcden_sig_polarity = 0;
 
-	dss_mgr_set_lcd_config(mgr, &dsi->mgr_config);
+	dss_mgr_set_lcd_config(channel, &dsi->mgr_config);
 
 	return 0;
 err1:
 	if (dsi->mode == OMAP_DSS_DSI_CMD_MODE)
-		dss_mgr_unregister_framedone_handler(mgr,
+		dss_mgr_unregister_framedone_handler(channel,
 				dsi_framedone_irq_callback, dsidev);
 err:
-	dss_select_lcd_clk_source(mgr->id, OMAP_DSS_CLK_SRC_FCK);
+	dss_select_lcd_clk_source(channel, OMAP_DSS_CLK_SRC_FCK);
 	return r;
 }
 
 static void dsi_display_uninit_dispc(struct platform_device *dsidev,
-		struct omap_overlay_manager *mgr)
+		enum omap_channel channel)
 {
 	struct dsi_data *dsi = dsi_get_dsidrv_data(dsidev);
 
 	if (dsi->mode == OMAP_DSS_DSI_CMD_MODE)
-		dss_mgr_unregister_framedone_handler(mgr,
+		dss_mgr_unregister_framedone_handler(channel,
 				dsi_framedone_irq_callback, dsidev);
 
-	dss_select_lcd_clk_source(mgr->id, OMAP_DSS_CLK_SRC_FCK);
+	dss_select_lcd_clk_source(channel, OMAP_DSS_CLK_SRC_FCK);
 }
 
 static int dsi_configure_dsi_clocks(struct platform_device *dsidev)
@@ -4982,18 +4983,14 @@ static int dsi_connect(struct omap_dss_device *dssdev,
 		struct omap_dss_device *dst)
 {
 	struct platform_device *dsidev = dsi_get_dsidev_from_dssdev(dssdev);
-	struct omap_overlay_manager *mgr;
+	enum omap_channel dispc_channel = dssdev->dispc_channel;
 	int r;
 
 	r = dsi_regulator_init(dsidev);
 	if (r)
 		return r;
 
-	mgr = omap_dss_get_overlay_manager(dssdev->dispc_channel);
-	if (!mgr)
-		return -ENODEV;
-
-	r = dss_mgr_connect(mgr, dssdev);
+	r = dss_mgr_connect(dispc_channel, dssdev);
 	if (r)
 		return r;
 
@@ -5001,7 +4998,7 @@ static int dsi_connect(struct omap_dss_device *dssdev,
 	if (r) {
 		DSSERR("failed to connect output to new device: %s\n",
 				dssdev->name);
-		dss_mgr_disconnect(mgr, dssdev);
+		dss_mgr_disconnect(dispc_channel, dssdev);
 		return r;
 	}
 
@@ -5011,6 +5008,8 @@ static int dsi_connect(struct omap_dss_device *dssdev,
 static void dsi_disconnect(struct omap_dss_device *dssdev,
 		struct omap_dss_device *dst)
 {
+	enum omap_channel dispc_channel = dssdev->dispc_channel;
+
 	WARN_ON(dst != dssdev->dst);
 
 	if (dst != dssdev->dst)
@@ -5018,8 +5017,7 @@ static void dsi_disconnect(struct omap_dss_device *dssdev,
 
 	omapdss_output_unset_device(dssdev);
 
-	if (dssdev->manager)
-		dss_mgr_disconnect(dssdev->manager, dssdev);
+	dss_mgr_disconnect(dispc_channel, dssdev);
 }
 
 static const struct omapdss_dsi_ops dsi_ops = {
@@ -5274,8 +5272,9 @@ static int dsi_init_pll_data(struct platform_device *dsidev)
 }
 
 /* DSI1 HW IP initialisation */
-static int omap_dsihw_probe(struct platform_device *dsidev)
+static int dsi_bind(struct device *dev, struct device *master, void *data)
 {
+	struct platform_device *dsidev = to_platform_device(dev);
 	u32 rev;
 	int r, i;
 	struct dsi_data *dsi;
@@ -5484,8 +5483,9 @@ err_runtime_get:
 	return r;
 }
 
-static int __exit omap_dsihw_remove(struct platform_device *dsidev)
+static void dsi_unbind(struct device *dev, struct device *master, void *data)
 {
+	struct platform_device *dsidev = to_platform_device(dev);
 	struct dsi_data *dsi = dsi_get_dsidrv_data(dsidev);
 
 	of_platform_depopulate(&dsidev->dev);
@@ -5502,7 +5502,21 @@ static int __exit omap_dsihw_remove(struct platform_device *dsidev)
 		regulator_disable(dsi->vdds_dsi_reg);
 		dsi->vdds_dsi_enabled = false;
 	}
+}
 
+static const struct component_ops dsi_component_ops = {
+	.bind	= dsi_bind,
+	.unbind	= dsi_unbind,
+};
+
+static int dsi_probe(struct platform_device *pdev)
+{
+	return component_add(&pdev->dev, &dsi_component_ops);
+}
+
+static int dsi_remove(struct platform_device *pdev)
+{
+	component_del(&pdev->dev, &dsi_component_ops);
 	return 0;
 }
 
@@ -5569,8 +5583,8 @@ static const struct of_device_id dsi_of_match[] = {
 };
 
 static struct platform_driver omap_dsihw_driver = {
-	.probe		= omap_dsihw_probe,
-	.remove         = __exit_p(omap_dsihw_remove),
+	.probe		= dsi_probe,
+	.remove		= dsi_remove,
 	.driver         = {
 		.name   = "omapdss_dsi",
 		.pm	= &dsi_pm_ops,
@@ -5584,7 +5598,7 @@ int __init dsi_init_platform_driver(void)
 	return platform_driver_register(&omap_dsihw_driver);
 }
 
-void __exit dsi_uninit_platform_driver(void)
+void dsi_uninit_platform_driver(void)
 {
 	platform_driver_unregister(&omap_dsihw_driver);
 }

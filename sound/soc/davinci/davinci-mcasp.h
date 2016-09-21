@@ -99,6 +99,13 @@
 #define MCASP_RFIFOCTL_OFFSET		(0x8)
 #define MCASP_RFIFOSTS_OFFSET		(0xc)
 
+/* DAVINCI_MCASP_PID_REG - Peripheral Identification Register Bits */
+#define MCASP_V4_REVMINOR_MASK		(0x3f)
+#define MCASP_V4_REVMAJOR_MASK		(0x7 << 8)
+#define MCASP_V4_REV_MASK		(MCASP_V4_REVMAJOR_MASK | \
+					 MCASP_V4_REVMINOR_MASK)
+#define MCASP_V4_REV(maj, min)		((maj) << 8 | (min))
+
 /*
  * DAVINCI_MCASP_PWREMUMGT_REG - Power Down and Emulation Management
  *     Register Bits
@@ -215,7 +222,10 @@
  * DAVINCI_MCASP_XRSRCTL_BASE_REG -  Serializer Control Register Bits
  */
 #define MODE(val)	(val)
-#define DISMOD		(val)(val<<2)
+#define DISMOD_3STATE	(0x0)
+#define DISMOD_LOW	(0x2 << 2)
+#define DISMOD_HIGH	(0x3 << 2)
+#define DISMOD_MASK	DISMOD_HIGH
 #define TXSTATE		BIT(4)
 #define RXSTATE		BIT(5)
 #define SRMOD_MASK	3

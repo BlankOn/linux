@@ -108,6 +108,7 @@ config SERIAL_8250_PCI
 	tristate "8250/16550 PCI device support" if EXPERT
 	depends on SERIAL_8250 && PCI
 	default SERIAL_8250
+	select RATIONAL
 	help
 	  This builds standard PCI serial support. You may be able to
 	  disable this feature if you only need legacy serial support.
@@ -340,4 +341,12 @@ config SERIAL_8250_MT6577
 	depends on SERIAL_8250 && ARCH_MEDIATEK
 	help
 	  If you have a Mediatek based board and want to use the
+	  serial port, say Y to this option. If unsure, say N.
+
+config SERIAL_8250_KEYSTONE
+	bool "TI Keystone serial port support"
+	depends on SERIAL_8250 && ARCH_KEYSTONE
+	default y
+	help
+	  If you have a TI Keystone based board and want to use the
 	  serial port, say Y to this option. If unsure, say N.

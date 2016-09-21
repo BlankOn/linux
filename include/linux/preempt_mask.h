@@ -44,16 +44,26 @@
 #define HARDIRQ_OFFSET	(1UL << HARDIRQ_SHIFT)
 #define NMI_OFFSET	(1UL << NMI_SHIFT)
 
-#define SOFTIRQ_DISABLE_OFFSET	(2 * SOFTIRQ_OFFSET)
+#ifndef CONFIG_PREEMPT_RT_FULL
+# define SOFTIRQ_DISABLE_OFFSET	(2 * SOFTIRQ_OFFSET)
+#else
+# define SOFTIRQ_DISABLE_OFFSET	(0)
+#endif
 
 #define PREEMPT_ACTIVE_BITS	1
 #define PREEMPT_ACTIVE_SHIFT	(NMI_SHIFT + NMI_BITS)
 #define PREEMPT_ACTIVE	(__IRQ_MASK(PREEMPT_ACTIVE_BITS) << PREEMPT_ACTIVE_SHIFT)
 
 #define hardirq_count()	(preempt_count() & HARDIRQ_MASK)
-#define softirq_count()	(preempt_count() & SOFTIRQ_MASK)
 #define irq_count()	(preempt_count() & (HARDIRQ_MASK | SOFTIRQ_MASK \
 				 | NMI_MASK))
+#ifndef CONFIG_PREEMPT_RT_FULL
+# define softirq_count()	(preempt_count() & SOFTIRQ_MASK)
+# define in_serving_softirq()	(softirq_count() & SOFTIRQ_OFFSET)
+#else
+# define softirq_count()	(0UL)
+extern int in_serving_softirq(void);
+#endif
 
 /*
  * Are we doing bottom half or hardware interrupt processing?
@@ -64,7 +74,6 @@
 #define in_irq()		(hardirq_count())
 #define in_softirq()		(softirq_count())
 #define in_interrupt()		(irq_count())
-#define in_serving_softirq()	(softirq_count() & SOFTIRQ_OFFSET)
 
 /*
  * Are we in NMI context?
@@ -75,6 +84,24 @@
 # define PREEMPT_CHECK_OFFSET 1
 #else
 # define PREEMPT_CHECK_OFFSET 0
+#endif
+
+/*
+ * The preempt_count offset after preempt_disable();
+ */
+#if defined(CONFIG_PREEMPT_COUNT)
+# define PREEMPT_DISABLE_OFFSET	PREEMPT_OFFSET
+#else
+# define PREEMPT_DISABLE_OFFSET	0
+#endif
+
+/*
+ * The preempt_count offset after spin_lock()
+ */
+#if defined(CONFIG_PREEMPT_COUNT) && !defined(CONFIG_PREEMPT_RT_FULL)
+#define PREEMPT_LOCK_OFFSET	PREEMPT_OFFSET
+#else
+#define PREEMPT_LOCK_OFFSET	0
 #endif
 
 /*
@@ -90,7 +117,7 @@
  *
  * Work as expected.
  */
-#define SOFTIRQ_LOCK_OFFSET (SOFTIRQ_DISABLE_OFFSET + PREEMPT_CHECK_OFFSET)
+#define SOFTIRQ_LOCK_OFFSET (SOFTIRQ_DISABLE_OFFSET + PREEMPT_LOCK_OFFSET)
 
 /*
  * Are we running in atomic context?  WARNING: this macro cannot
@@ -106,7 +133,7 @@
  * (used by the scheduler, *after* releasing the kernel lock)
  */
 #define in_atomic_preempt_off() \
-		((preempt_count() & ~PREEMPT_ACTIVE) != PREEMPT_CHECK_OFFSET)
+		((preempt_count() & ~PREEMPT_ACTIVE) != PREEMPT_DISABLE_OFFSET)
 
 #ifdef CONFIG_PREEMPT_COUNT
 # define preemptible()	(preempt_count() == 0 && !irqs_disabled())

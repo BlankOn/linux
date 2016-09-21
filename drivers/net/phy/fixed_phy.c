@@ -52,6 +52,10 @@ static int fixed_phy_update_regs(struct fixed_phy *fp)
 	u16 lpagb = 0;
 	u16 lpa = 0;
 
+	if (!fp->status.link)
+		goto done;
+	bmsr |= BMSR_LSTATUS | BMSR_ANEGCOMPLETE;
+
 	if (fp->status.duplex) {
 		bmcr |= BMCR_FULLDPLX;
 
@@ -96,15 +100,13 @@ static int fixed_phy_update_regs(struct fixed_phy *fp)
 		}
 	}
 
-	if (fp->status.link)
-		bmsr |= BMSR_LSTATUS | BMSR_ANEGCOMPLETE;
-
 	if (fp->status.pause)
 		lpa |= LPA_PAUSE_CAP;
 
 	if (fp->status.asym_pause)
 		lpa |= LPA_PAUSE_ASYM;
 
+done:
 	fp->regs[MII_PHYSID1] = 0;
 	fp->regs[MII_PHYSID2] = 0;
 
@@ -182,6 +184,35 @@ int fixed_phy_set_link_update(struct phy_device *phydev,
 	return -ENOENT;
 }
 EXPORT_SYMBOL_GPL(fixed_phy_set_link_update);
+
+int fixed_phy_update_state(struct phy_device *phydev,
+			   const struct fixed_phy_status *status,
+			   const struct fixed_phy_status *changed)
+{
+	struct fixed_mdio_bus *fmb = &platform_fmb;
+	struct fixed_phy *fp;
+
+	if (!phydev || !phydev->bus)
+		return -EINVAL;
+
+	list_for_each_entry(fp, &fmb->phys, node) {
+		if (fp->addr == phydev->addr) {
+#define _UPD(x) if (changed->x) \
+	fp->status.x = status->x
+			_UPD(link);
+			_UPD(speed);
+			_UPD(duplex);
+			_UPD(pause);
+			_UPD(asym_pause);
+#undef _UPD
+			fixed_phy_update_regs(fp);
+			return 0;
+		}
+	}
+
+	return -ENOENT;
+}
+EXPORT_SYMBOL(fixed_phy_update_state);
 
 int fixed_phy_add(unsigned int irq, int phy_addr,
 		  struct fixed_phy_status *status)

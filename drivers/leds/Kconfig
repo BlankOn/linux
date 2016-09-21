@@ -467,6 +467,14 @@ config LEDS_TCA6507
 	  LED driver chips accessed via the I2C bus.
 	  Driver support brightness control and hardware-assisted blinking.
 
+config LEDS_TLC591XX
+	tristate "LED driver for TLC59108 and TLC59116 controllers"
+	depends on LEDS_CLASS && I2C
+	select REGMAP_I2C
+	help
+	  This option enables support for Texas Instruments TLC59108
+	  and TLC59116 LED controllers.
+
 config LEDS_MAX8997
 	tristate "LED support for MAX8997 PMIC"
 	depends on LEDS_CLASS && MFD_MAX8997
@@ -525,6 +533,14 @@ config LEDS_VERSATILE
 	help
 	  This option enabled support for the LEDs on the ARM Versatile
 	  and RealView boards. Say Y to enabled these.
+
+config LEDS_PM8941_WLED
+	tristate "LED support for the Qualcomm PM8941 WLED block"
+	depends on LEDS_CLASS
+	select REGMAP
+	help
+	  This option enables support for the 'White' LED block
+	  on Qualcomm PM8941 PMICs.
 
 comment "LED Triggers"
 source "drivers/leds/trigger/Kconfig"

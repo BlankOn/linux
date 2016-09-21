@@ -389,6 +389,7 @@ static struct rcu_torture_ops rcu_ops = {
 	.name		= "rcu"
 };
 
+#ifndef CONFIG_PREEMPT_RT_FULL
 /*
  * Definitions for rcu_bh torture testing.
  */
@@ -427,6 +428,12 @@ static struct rcu_torture_ops rcu_bh_ops = {
 	.irq_capable	= 1,
 	.name		= "rcu_bh"
 };
+
+#else
+static struct rcu_torture_ops rcu_bh_ops = {
+	.ttype		= INVALID_RCU_FLAVOR,
+};
+#endif
 
 /*
  * Don't even think about trying any of these in real life!!!
@@ -853,6 +860,8 @@ rcu_torture_fqs(void *arg)
 static int
 rcu_torture_writer(void *arg)
 {
+	bool can_expedite = !rcu_gp_is_expedited();
+	int expediting = 0;
 	unsigned long gp_snap;
 	bool gp_cond1 = gp_cond, gp_exp1 = gp_exp, gp_normal1 = gp_normal;
 	bool gp_sync1 = gp_sync;
@@ -865,9 +874,15 @@ rcu_torture_writer(void *arg)
 	int nsynctypes = 0;
 
 	VERBOSE_TOROUT_STRING("rcu_torture_writer task started");
+	pr_alert("%s" TORTURE_FLAG
+		 " Grace periods expedited from boot/sysfs for %s,\n",
+		 torture_type, cur_ops->name);
+	pr_alert("%s" TORTURE_FLAG
+		 " Testing of dynamic grace-period expediting diabled.\n",
+		 torture_type);
 
 	/* Initialize synctype[] array.  If none set, take default. */
-	if (!gp_cond1 && !gp_exp1 && !gp_normal1 && !gp_sync)
+	if (!gp_cond1 && !gp_exp1 && !gp_normal1 && !gp_sync1)
 		gp_cond1 = gp_exp1 = gp_normal1 = gp_sync1 = true;
 	if (gp_cond1 && cur_ops->get_state && cur_ops->cond_sync)
 		synctype[nsynctypes++] = RTWS_COND_GET;
@@ -949,9 +964,26 @@ rcu_torture_writer(void *arg)
 			}
 		}
 		rcutorture_record_progress(++rcu_torture_current_version);
+		/* Cycle through nesting levels of rcu_expedite_gp() calls. */
+		if (can_expedite &&
+		    !(torture_random(&rand) & 0xff & (!!expediting - 1))) {
+			WARN_ON_ONCE(expediting == 0 && rcu_gp_is_expedited());
+			if (expediting >= 0)
+				rcu_expedite_gp();
+			else
+				rcu_unexpedite_gp();
+			if (++expediting > 3)
+				expediting = -expediting;
+		}
 		rcu_torture_writer_state = RTWS_STUTTER;
 		stutter_wait("rcu_torture_writer");
 	} while (!torture_must_stop());
+	/* Reset expediting back to unexpedited. */
+	if (expediting > 0)
+		expediting = -expediting;
+	while (can_expedite && expediting++ < 0)
+		rcu_unexpedite_gp();
+	WARN_ON_ONCE(can_expedite && rcu_gp_is_expedited());
 	rcu_torture_writer_state = RTWS_STOPPING;
 	torture_kthread_stopping("rcu_torture_writer");
 	return 0;

@@ -35,6 +35,7 @@ static const struct clk_ops omap_gate_clkdm_clk_ops = {
 	.init		= &omap2_init_clk_clkdm,
 	.enable		= &omap2_clkops_enable_clkdm,
 	.disable	= &omap2_clkops_disable_clkdm,
+	.restore_context = clk_dflt_restore_context,
 };
 
 static const struct clk_ops omap_gate_clk_ops = {
@@ -42,6 +43,7 @@ static const struct clk_ops omap_gate_clk_ops = {
 	.enable		= &omap2_dflt_clk_enable,
 	.disable	= &omap2_dflt_clk_disable,
 	.is_enabled	= &omap2_dflt_clk_is_enabled,
+	.restore_context = clk_dflt_restore_context,
 };
 
 static const struct clk_ops omap_gate_clk_hsdiv_restore_ops = {
@@ -49,6 +51,7 @@ static const struct clk_ops omap_gate_clk_hsdiv_restore_ops = {
 	.enable		= &omap36xx_gate_clk_enable_with_hsdiv_restore,
 	.disable	= &omap2_dflt_clk_disable,
 	.is_enabled	= &omap2_dflt_clk_is_enabled,
+	.restore_context = clk_dflt_restore_context,
 };
 
 /**
@@ -225,7 +228,7 @@ static void __init _of_ti_gate_clk_setup(struct device_node *node,
 
 	if (ops != &omap_gate_clkdm_clk_ops) {
 		reg = ti_clk_get_reg_addr(node, 0);
-		if (!reg)
+		if (IS_ERR(reg))
 			return;
 
 		if (!of_property_read_u32(node, "ti,bit-shift", &val))
@@ -264,7 +267,7 @@ _of_ti_composite_gate_clk_setup(struct device_node *node,
 		return;
 
 	gate->enable_reg = ti_clk_get_reg_addr(node, 0);
-	if (!gate->enable_reg)
+	if (IS_ERR(gate->enable_reg))
 		goto cleanup;
 
 	of_property_read_u32(node, "ti,bit-shift", &val);

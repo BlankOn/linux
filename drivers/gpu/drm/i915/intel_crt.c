@@ -312,8 +312,14 @@ static bool intel_crt_compute_config(struct intel_encoder *encoder,
 		pipe_config->has_pch_encoder = true;
 
 	/* LPT FDI RX only supports 8bpc. */
-	if (HAS_PCH_LPT(dev))
+	if (HAS_PCH_LPT(dev)) {
+		if (pipe_config->bw_constrained && pipe_config->pipe_bpp < 24) {
+			DRM_DEBUG_KMS("LPT only supports 24bpp\n");
+			return false;
+		}
+
 		pipe_config->pipe_bpp = 24;
+	}
 
 	/* FDI must always be 2.7 GHz */
 	if (HAS_DDI(dev)) {
@@ -690,7 +696,7 @@ intel_crt_detect(struct drm_connector *connector, bool force)
 	 * broken monitor (without edid) to work behind a broken kvm (that fails
 	 * to have the right resistors for HP detection) needs to fix this up.
 	 * For now just bail out. */
-	if (I915_HAS_HOTPLUG(dev)) {
+	if (I915_HAS_HOTPLUG(dev) && !i915.load_detect_test) {
 		status = connector_status_disconnected;
 		goto out;
 	}
@@ -706,9 +712,11 @@ intel_crt_detect(struct drm_connector *connector, bool force)
 	if (intel_get_load_detect_pipe(connector, NULL, &tmp, &ctx)) {
 		if (intel_crt_detect_ddc(connector))
 			status = connector_status_connected;
-		else
+		else if (INTEL_INFO(dev)->gen < 4)
 			status = intel_crt_load_detect(crt);
-		intel_release_load_detect_pipe(connector, &tmp);
+		else
+			status = connector_status_unknown;
+		intel_release_load_detect_pipe(connector, &tmp, &ctx);
 	} else
 		status = connector_status_unknown;
 
@@ -794,6 +802,7 @@ static const struct drm_connector_funcs intel_crt_connector_funcs = {
 	.destroy = intel_crt_destroy,
 	.set_property = intel_crt_set_property,
 	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
+	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
 	.atomic_get_property = intel_connector_atomic_get_property,
 };
 
@@ -848,7 +857,7 @@ void intel_crt_init(struct drm_device *dev)
 	if (!crt)
 		return;
 
-	intel_connector = kzalloc(sizeof(*intel_connector), GFP_KERNEL);
+	intel_connector = intel_connector_alloc();
 	if (!intel_connector) {
 		kfree(crt);
 		return;

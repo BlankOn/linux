@@ -151,6 +151,9 @@ void hists__calc_col_len(struct hists *hists, struct hist_entry *h)
 	hists__new_col_len(hists, HISTC_LOCAL_WEIGHT, 12);
 	hists__new_col_len(hists, HISTC_GLOBAL_WEIGHT, 12);
 
+	if (h->srcline)
+		hists__new_col_len(hists, HISTC_SRCLINE, strlen(h->srcline));
+
 	if (h->transaction)
 		hists__new_col_len(hists, HISTC_TRANSACTION,
 				   hist_entry__transaction_len());
@@ -263,15 +266,9 @@ void hists__decay_entries(struct hists *hists, bool zap_user, bool zap_kernel)
 	while (next) {
 		n = rb_entry(next, struct hist_entry, rb_node);
 		next = rb_next(&n->rb_node);
-		/*
-		 * We may be annotating this, for instance, so keep it here in
-		 * case some it gets new samples, we'll eventually free it when
-		 * the user stops browsing and it agains gets fully decayed.
-		 */
 		if (((zap_user && n->level == '.') ||
 		     (zap_kernel && n->level != '.') ||
-		     hists__decay_entry(hists, n)) &&
-		    !n->used) {
+		     hists__decay_entry(hists, n))) {
 			hists__delete_entry(hists, n);
 		}
 	}
@@ -355,6 +352,7 @@ static struct hist_entry *hist_entry__new(struct hist_entry *template,
 			callchain_init(he->callchain);
 
 		INIT_LIST_HEAD(&he->pairs.node);
+		thread__get(he->thread);
 	}
 
 	return he;
@@ -941,6 +939,7 @@ hist_entry__collapse(struct hist_entry *left, struct hist_entry *right)
 
 void hist_entry__delete(struct hist_entry *he)
 {
+	thread__zput(he->thread);
 	zfree(&he->branch_info);
 	zfree(&he->mem_info);
 	zfree(&he->stat_acc);
@@ -1169,6 +1168,7 @@ static void hists__remove_entry_filter(struct hists *hists, struct hist_entry *h
 	/* force fold unfiltered entry for simplicity */
 	h->ms.unfolded = false;
 	h->row_offset = 0;
+	h->nr_rows = 0;
 
 	hists->stats.nr_non_filtered_samples += h->stat.nr_events;
 

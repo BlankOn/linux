@@ -11,10 +11,6 @@
  * FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License for
  * more details.
  *
- * You should have received a copy of the GNU General Public License along with
- * this program; if not, write to the Free Software Foundation, Inc., 59
- * Temple Place - Suite 330, Boston, MA  02111-1307, USA.
- *
  * The full GNU General Public License is included in this distribution in the
  * file called COPYING.
  */
@@ -226,6 +222,16 @@ struct dma_chan_percpu {
 };
 
 /**
+ * struct dma_router - DMA router structure
+ * @dev: pointer to the DMA router device
+ * @route_free: function to be called when the route can be disconnected
+ */
+struct dma_router {
+	struct device *dev;
+	void (*route_free)(struct device *dev, void *route_data);
+};
+
+/**
  * struct dma_chan - devices supply DMA channels, clients use them
  * @device: ptr to the dma device who supplies this channel, always !%NULL
  * @cookie: last cookie value returned to client
@@ -236,6 +242,8 @@ struct dma_chan_percpu {
  * @local: per-cpu pointer to a struct dma_chan_percpu
  * @client_count: how many clients are using this channel
  * @table_count: number of appearances in the mem-to-mem allocation table
+ * @router: pointer to the DMA router structure
+ * @route_data: channel specific data for the router
  * @private: private data for certain client-channel associations
  */
 struct dma_chan {
@@ -251,6 +259,11 @@ struct dma_chan {
 	struct dma_chan_percpu __percpu *local;
 	int client_count;
 	int table_count;
+
+	/* DMA router */
+	struct dma_router *router;
+	void *route_data;
+
 	void *private;
 };
 
@@ -574,7 +587,6 @@ struct dma_tx_state {
  * @copy_align: alignment shift for memcpy operations
  * @xor_align: alignment shift for xor operations
  * @pq_align: alignment shift for pq operations
- * @fill_align: alignment shift for memset operations
  * @dev_id: unique device ID
  * @dev: struct device reference for dma mapping api
  * @src_addr_widths: bit mask of src addr widths the device supports
@@ -607,6 +619,8 @@ struct dma_tx_state {
  *	paused. Returns 0 or an error code
  * @device_terminate_all: Aborts all transfers on a channel. Returns 0
  *	or an error code
+ * @device_synchronize: Synchronizes the termination of a transfers to the
+ *  current context.
  * @device_tx_status: poll for transaction completion, the optional
  *	txstate parameter can be supplied with a pointer to get a
  *	struct with auxiliary transfer status information, otherwise the call
@@ -625,7 +639,6 @@ struct dma_device {
 	u8 copy_align;
 	u8 xor_align;
 	u8 pq_align;
-	u8 fill_align;
 	#define DMA_HAS_PQ_CONTINUE (1 << 15)
 
 	int dev_id;
@@ -681,6 +694,7 @@ struct dma_device {
 	int (*device_pause)(struct dma_chan *chan);
 	int (*device_resume)(struct dma_chan *chan);
 	int (*device_terminate_all)(struct dma_chan *chan);
+	void (*device_synchronize)(struct dma_chan *chan);
 
 	enum dma_status (*device_tx_status)(struct dma_chan *chan,
 					    dma_cookie_t cookie,
@@ -761,12 +775,101 @@ static inline struct dma_async_tx_descriptor *dmaengine_prep_dma_sg(
 			src_sg, src_nents, flags);
 }
 
+/**
+ * dmaengine_terminate_all() - Terminate all active DMA transfers
+ * @chan: The channel for which to terminate the transfers
+ *
+ * This function is DEPRECATED use either dmaengine_terminate_sync() or
+ * dmaengine_terminate_async() instead.
+ */
 static inline int dmaengine_terminate_all(struct dma_chan *chan)
 {
 	if (chan->device->device_terminate_all)
 		return chan->device->device_terminate_all(chan);
 
 	return -ENOSYS;
+}
+
+/**
+ * dmaengine_terminate_async() - Terminate all active DMA transfers
+ * @chan: The channel for which to terminate the transfers
+ *
+ * Calling this function will terminate all active and pending descriptors
+ * that have previously been submitted to the channel. It is not guaranteed
+ * though that the transfer for the active descriptor has stopped when the
+ * function returns. Furthermore it is possible the complete callback of a
+ * submitted transfer is still running when this function returns.
+ *
+ * dmaengine_synchronize() needs to be called before it is safe to free
+ * any memory that is accessed by previously submitted descriptors or before
+ * freeing any resources accessed from within the completion callback of any
+ * perviously submitted descriptors.
+ *
+ * This function can be called from atomic context as well as from within a
+ * complete callback of a descriptor submitted on the same channel.
+ *
+ * If none of the two conditions above apply consider using
+ * dmaengine_terminate_sync() instead.
+ */
+static inline int dmaengine_terminate_async(struct dma_chan *chan)
+{
+	if (chan->device->device_terminate_all)
+		return chan->device->device_terminate_all(chan);
+
+	return -EINVAL;
+}
+
+/**
+ * dmaengine_synchronize() - Synchronize DMA channel termination
+ * @chan: The channel to synchronize
+ *
+ * Synchronizes to the DMA channel termination to the current context. When this
+ * function returns it is guaranteed that all transfers for previously issued
+ * descriptors have stopped and and it is safe to free the memory assoicated
+ * with them. Furthermore it is guaranteed that all complete callback functions
+ * for a previously submitted descriptor have finished running and it is safe to
+ * free resources accessed from within the complete callbacks.
+ *
+ * The behavior of this function is undefined if dma_async_issue_pending() has
+ * been called between dmaengine_terminate_async() and this function.
+ *
+ * This function must only be called from non-atomic context and must not be
+ * called from within a complete callback of a descriptor submitted on the same
+ * channel.
+ */
+static inline void dmaengine_synchronize(struct dma_chan *chan)
+{
+	might_sleep();
+
+	if (chan->device->device_synchronize)
+		chan->device->device_synchronize(chan);
+}
+
+/**
+ * dmaengine_terminate_sync() - Terminate all active DMA transfers
+ * @chan: The channel for which to terminate the transfers
+ *
+ * Calling this function will terminate all active and pending transfers
+ * that have previously been submitted to the channel. It is similar to
+ * dmaengine_terminate_async() but guarantees that the DMA transfer has actually
+ * stopped and that all complete callbacks have finished running when the
+ * function returns.
+ *
+ * This function must only be called from non-atomic context and must not be
+ * called from within a complete callback of a descriptor submitted on the same
+ * channel.
+ */
+static inline int dmaengine_terminate_sync(struct dma_chan *chan)
+{
+	int ret;
+
+	ret = dmaengine_terminate_async(chan);
+	if (ret)
+		return ret;
+
+	dmaengine_synchronize(chan);
+
+	return 0;
 }
 
 static inline int dmaengine_pause(struct dma_chan *chan)
@@ -824,12 +927,6 @@ static inline bool is_dma_pq_aligned(struct dma_device *dev, size_t off1,
 				     size_t off2, size_t len)
 {
 	return dmaengine_check_align(dev->pq_align, off1, off2, len);
-}
-
-static inline bool is_dma_fill_aligned(struct dma_device *dev, size_t off1,
-				       size_t off2, size_t len)
-{
-	return dmaengine_check_align(dev->fill_align, off1, off2, len);
 }
 
 static inline void
@@ -1098,7 +1195,6 @@ void dma_async_device_unregister(struct dma_device *device);
 void dma_run_dependencies(struct dma_async_tx_descriptor *tx);
 struct dma_chan *dma_get_slave_channel(struct dma_chan *chan);
 struct dma_chan *dma_get_any_slave_channel(struct dma_device *device);
-struct dma_chan *net_dma_find_channel(void);
 #define dma_request_channel(mask, x, y) __dma_request_channel(&(mask), x, y)
 #define dma_request_slave_channel_compat(mask, x, y, dev, name) \
 	__dma_request_slave_channel_compat(&(mask), x, y, dev, name)
@@ -1117,26 +1213,25 @@ static inline struct dma_chan
 	return __dma_request_channel(mask, fn, fn_param);
 }
 
-/* --- Helper iov-locking functions --- */
+#define dma_request_slave_channel_compat_reason(mask, x, y, dev, name) \
+	__dma_request_slave_channel_compat_reason(&(mask), x, y, dev, name)
 
-struct dma_page_list {
-	char __user *base_address;
-	int nr_pages;
-	struct page **pages;
-};
+static inline struct dma_chan
+*__dma_request_slave_channel_compat_reason(const dma_cap_mask_t *mask,
+				  dma_filter_fn fn, void *fn_param,
+				  struct device *dev, char *name)
+{
+	struct dma_chan *chan;
 
-struct dma_pinned_list {
-	int nr_iovecs;
-	struct dma_page_list page_list[0];
-};
+	chan = dma_request_slave_channel_reason(dev, name);
+	/* Try via legacy API if not requesting for deferred probing */
+	if (IS_ERR(chan) && PTR_ERR(chan) != -EPROBE_DEFER)
+		chan = __dma_request_channel(mask, fn, fn_param);
 
-struct dma_pinned_list *dma_pin_iovec_pages(struct iovec *iov, size_t len);
-void dma_unpin_iovec_pages(struct dma_pinned_list* pinned_list);
+	if (!chan)
+		chan = ERR_PTR(-ENODEV);
 
-dma_cookie_t dma_memcpy_to_iovec(struct dma_chan *chan, struct iovec *iov,
-	struct dma_pinned_list *pinned_list, unsigned char *kdata, size_t len);
-dma_cookie_t dma_memcpy_pg_to_iovec(struct dma_chan *chan, struct iovec *iov,
-	struct dma_pinned_list *pinned_list, struct page *page,
-	unsigned int offset, size_t len);
+	return chan;
+}
 
 #endif /* DMAENGINE_H */

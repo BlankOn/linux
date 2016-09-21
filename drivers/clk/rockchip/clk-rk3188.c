@@ -704,10 +704,13 @@ static struct rockchip_clk_branch rk3188_clk_branches[] __initdata = {
 	GATE(ACLK_GPS, "aclk_gps", "aclk_peri", 0, RK2928_CLKGATE_CON(8), 13, GFLAGS),
 };
 
-static const char *rk3188_critical_clocks[] __initconst = {
+static const char *const rk3188_critical_clocks[] __initconst = {
 	"aclk_cpu",
 	"aclk_peri",
 	"hclk_peri",
+	"pclk_cpu",
+	"pclk_peri",
+	"hclk_cpubus"
 };
 
 static void __init rk3188_common_clk_init(struct device_node *np)

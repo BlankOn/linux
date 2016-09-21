@@ -27,6 +27,7 @@
 #include <linux/platform_device.h>
 #include <linux/string.h>
 #include <linux/of.h>
+#include <linux/component.h>
 
 #include <video/omapdss.h>
 #include "dss.h"
@@ -113,7 +114,7 @@ static int sdi_calc_clock_div(unsigned long pclk,
 
 static void sdi_config_lcd_manager(struct omap_dss_device *dssdev)
 {
-	struct omap_overlay_manager *mgr = sdi.output.manager;
+	enum omap_channel channel = dssdev->dispc_channel;
 
 	sdi.mgr_config.io_pad_mode = DSS_IO_PAD_MODE_BYPASS;
 
@@ -123,19 +124,20 @@ static void sdi_config_lcd_manager(struct omap_dss_device *dssdev)
 	sdi.mgr_config.video_port_width = 24;
 	sdi.mgr_config.lcden_sig_polarity = 1;
 
-	dss_mgr_set_lcd_config(mgr, &sdi.mgr_config);
+	dss_mgr_set_lcd_config(channel, &sdi.mgr_config);
 }
 
 static int sdi_display_enable(struct omap_dss_device *dssdev)
 {
 	struct omap_dss_device *out = &sdi.output;
+	enum omap_channel channel = dssdev->dispc_channel;
 	struct omap_video_timings *t = &sdi.timings;
 	unsigned long fck;
 	struct dispc_clock_info dispc_cinfo;
 	unsigned long pck;
 	int r;
 
-	if (out == NULL || out->manager == NULL) {
+	if (!out->dispc_channel_connected) {
 		DSSERR("failed to enable display: no output/manager\n");
 		return -ENODEV;
 	}
@@ -168,7 +170,7 @@ static int sdi_display_enable(struct omap_dss_device *dssdev)
 	}
 
 
-	dss_mgr_set_timings(out->manager, t);
+	dss_mgr_set_timings(channel, t);
 
 	r = dss_set_fck_rate(fck);
 	if (r)
@@ -187,7 +189,7 @@ static int sdi_display_enable(struct omap_dss_device *dssdev)
 	 * need to care about the shadow register mechanism for pck-free. The
 	 * exact reason for this is unknown.
 	 */
-	dispc_mgr_set_clock_div(out->manager->id, &sdi.mgr_config.clock_info);
+	dispc_mgr_set_clock_div(channel, &sdi.mgr_config.clock_info);
 
 	dss_sdi_init(sdi.datapairs);
 	r = dss_sdi_enable();
@@ -195,7 +197,7 @@ static int sdi_display_enable(struct omap_dss_device *dssdev)
 		goto err_sdi_enable;
 	mdelay(2);
 
-	r = dss_mgr_enable(out->manager);
+	r = dss_mgr_enable(channel);
 	if (r)
 		goto err_mgr_enable;
 
@@ -215,9 +217,9 @@ err_reg_enable:
 
 static void sdi_display_disable(struct omap_dss_device *dssdev)
 {
-	struct omap_overlay_manager *mgr = sdi.output.manager;
+	enum omap_channel channel = dssdev->dispc_channel;
 
-	dss_mgr_disable(mgr);
+	dss_mgr_disable(channel);
 
 	dss_sdi_disable();
 
@@ -241,9 +243,9 @@ static void sdi_get_timings(struct omap_dss_device *dssdev,
 static int sdi_check_timings(struct omap_dss_device *dssdev,
 			struct omap_video_timings *timings)
 {
-	struct omap_overlay_manager *mgr = sdi.output.manager;
+	enum omap_channel channel = dssdev->dispc_channel;
 
-	if (mgr && !dispc_mgr_timings_ok(mgr->id, timings))
+	if (!dispc_mgr_timings_ok(channel, timings))
 		return -EINVAL;
 
 	if (timings->pixelclock == 0)
@@ -279,18 +281,14 @@ static int sdi_init_regulator(void)
 static int sdi_connect(struct omap_dss_device *dssdev,
 		struct omap_dss_device *dst)
 {
-	struct omap_overlay_manager *mgr;
+	enum omap_channel channel = dssdev->dispc_channel;
 	int r;
 
 	r = sdi_init_regulator();
 	if (r)
 		return r;
 
-	mgr = omap_dss_get_overlay_manager(dssdev->dispc_channel);
-	if (!mgr)
-		return -ENODEV;
-
-	r = dss_mgr_connect(mgr, dssdev);
+	r = dss_mgr_connect(channel, dssdev);
 	if (r)
 		return r;
 
@@ -298,7 +296,7 @@ static int sdi_connect(struct omap_dss_device *dssdev,
 	if (r) {
 		DSSERR("failed to connect output to new device: %s\n",
 				dst->name);
-		dss_mgr_disconnect(mgr, dssdev);
+		dss_mgr_disconnect(channel, dssdev);
 		return r;
 	}
 
@@ -308,6 +306,8 @@ static int sdi_connect(struct omap_dss_device *dssdev,
 static void sdi_disconnect(struct omap_dss_device *dssdev,
 		struct omap_dss_device *dst)
 {
+	enum omap_channel channel = dssdev->dispc_channel;
+
 	WARN_ON(dst != dssdev->dst);
 
 	if (dst != dssdev->dst)
@@ -315,8 +315,7 @@ static void sdi_disconnect(struct omap_dss_device *dssdev,
 
 	omapdss_output_unset_device(dssdev);
 
-	if (dssdev->manager)
-		dss_mgr_disconnect(dssdev->manager, dssdev);
+	dss_mgr_disconnect(channel, dssdev);
 }
 
 static const struct omapdss_sdi_ops sdi_ops = {
@@ -350,15 +349,17 @@ static void sdi_init_output(struct platform_device *pdev)
 	omapdss_register_output(out);
 }
 
-static void __exit sdi_uninit_output(struct platform_device *pdev)
+static void sdi_uninit_output(struct platform_device *pdev)
 {
 	struct omap_dss_device *out = &sdi.output;
 
 	omapdss_unregister_output(out);
 }
 
-static int omap_sdi_probe(struct platform_device *pdev)
+static int sdi_bind(struct device *dev, struct device *master, void *data)
 {
+	struct platform_device *pdev = to_platform_device(dev);
+
 	sdi.pdev = pdev;
 
 	sdi_init_output(pdev);
@@ -366,16 +367,32 @@ static int omap_sdi_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int __exit omap_sdi_remove(struct platform_device *pdev)
+static void sdi_unbind(struct device *dev, struct device *master, void *data)
 {
-	sdi_uninit_output(pdev);
+	struct platform_device *pdev = to_platform_device(dev);
 
+	sdi_uninit_output(pdev);
+}
+
+static const struct component_ops sdi_component_ops = {
+	.bind	= sdi_bind,
+	.unbind	= sdi_unbind,
+};
+
+static int sdi_probe(struct platform_device *pdev)
+{
+	return component_add(&pdev->dev, &sdi_component_ops);
+}
+
+static int sdi_remove(struct platform_device *pdev)
+{
+	component_del(&pdev->dev, &sdi_component_ops);
 	return 0;
 }
 
 static struct platform_driver omap_sdi_driver = {
-	.probe		= omap_sdi_probe,
-	.remove         = __exit_p(omap_sdi_remove),
+	.probe		= sdi_probe,
+	.remove         = sdi_remove,
 	.driver         = {
 		.name   = "omapdss_sdi",
 		.suppress_bind_attrs = true,
@@ -387,12 +404,12 @@ int __init sdi_init_platform_driver(void)
 	return platform_driver_register(&omap_sdi_driver);
 }
 
-void __exit sdi_uninit_platform_driver(void)
+void sdi_uninit_platform_driver(void)
 {
 	platform_driver_unregister(&omap_sdi_driver);
 }
 
-int __init sdi_init_port(struct platform_device *pdev, struct device_node *port)
+int sdi_init_port(struct platform_device *pdev, struct device_node *port)
 {
 	struct device_node *ep;
 	u32 datapairs;
@@ -426,7 +443,7 @@ err_datapairs:
 	return r;
 }
 
-void __exit sdi_uninit_port(struct device_node *port)
+void sdi_uninit_port(struct device_node *port)
 {
 	if (!sdi.port_initialized)
 		return;

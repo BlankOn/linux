@@ -40,6 +40,8 @@
 
 #include "mm.h"
 
+u64 idmap_t0sz = TCR_T0SZ(VA_BITS);
+
 /*
  * Empty_zero_page is a special page that is used for zero-initialized data
  * and COW.
@@ -448,12 +450,16 @@ void __init paging_init(void)
 
 	empty_zero_page = virt_to_page(zero_page);
 
+	/* Ensure the zero page is visible to the page table walker */
+	dsb(ishst);
+
 	/*
 	 * TTBR0 is only used for the identity mapping at this stage. Make it
 	 * point to zero page to avoid speculatively fetching new entries.
 	 */
 	cpu_set_reserved_ttbr0();
 	flush_tlb_all();
+	cpu_set_default_tcr_t0sz();
 }
 
 /*
@@ -461,8 +467,10 @@ void __init paging_init(void)
  */
 void setup_mm_for_reboot(void)
 {
-	cpu_switch_mm(idmap_pg_dir, &init_mm);
+	cpu_set_reserved_ttbr0();
 	flush_tlb_all();
+	cpu_set_idmap_tcr_t0sz();
+	cpu_switch_mm(idmap_pg_dir, &init_mm);
 }
 
 /*
@@ -550,10 +558,10 @@ void vmemmap_free(unsigned long start, unsigned long end)
 #endif	/* CONFIG_SPARSEMEM_VMEMMAP */
 
 static pte_t bm_pte[PTRS_PER_PTE] __page_aligned_bss;
-#if CONFIG_ARM64_PGTABLE_LEVELS > 2
+#if CONFIG_PGTABLE_LEVELS > 2
 static pmd_t bm_pmd[PTRS_PER_PMD] __page_aligned_bss;
 #endif
-#if CONFIG_ARM64_PGTABLE_LEVELS > 3
+#if CONFIG_PGTABLE_LEVELS > 3
 static pud_t bm_pud[PTRS_PER_PUD] __page_aligned_bss;
 #endif
 
@@ -627,10 +635,7 @@ void __set_fixmap(enum fixed_addresses idx,
 	unsigned long addr = __fix_to_virt(idx);
 	pte_t *pte;
 
-	if (idx >= __end_of_fixed_addresses) {
-		BUG();
-		return;
-	}
+	BUG_ON(idx <= FIX_HOLE || idx >= __end_of_fixed_addresses);
 
 	pte = fixmap_pte(addr);
 

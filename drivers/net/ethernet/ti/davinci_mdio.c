@@ -40,6 +40,9 @@
 #include <linux/of_device.h>
 #include <linux/of_mdio.h>
 #include <linux/pinctrl/consumer.h>
+#include <linux/gpio.h>
+#include <linux/gpio/consumer.h>
+#include <linux/of_gpio.h>
 
 /*
  * This timeout definition is a worst-case ultra defensive measure against
@@ -52,6 +55,8 @@
 #define PHY_ID_MASK		0x1f
 
 #define DEF_OUT_FREQ		2200000		/* 2.2 MHz */
+
+#define DEFAULT_GPIO_RESET_DELAY	10	/* in microseconds */
 
 struct davinci_mdio_regs {
 	u32	version;
@@ -100,7 +105,28 @@ struct davinci_mdio_data {
 	 * if MDIO bus is registered from DT.
 	 */
 	bool		skip_scan;
+	struct gpio_desc **gpio_reset;
+	int		num_gpios;
+	int		reset_delay_us;
 };
+
+static void __davinci_gpio_reset(struct davinci_mdio_data *data)
+{
+	int i;
+
+	for (i = 0; i < data->num_gpios; i++) {
+		if (!data->gpio_reset[i])
+			continue;
+
+		gpiod_set_value_cansleep(data->gpio_reset[i], 1);
+		udelay(data->reset_delay_us);
+		gpiod_set_value_cansleep(data->gpio_reset[i], 0);
+	}
+}
+
+#if IS_ENABLED(CONFIG_OF)
+static void davinci_mdio_update_dt_from_phymask(u32 phy_mask);
+#endif
 
 static void __davinci_mdio_reset(struct davinci_mdio_data *data)
 {
@@ -158,6 +184,12 @@ static int davinci_mdio_reset(struct mii_bus *bus)
 		/* restrict mdio bus to live phys only */
 		dev_info(data->dev, "detected phy mask %x\n", ~phy_mask);
 		phy_mask = ~phy_mask;
+
+		#if IS_ENABLED(CONFIG_OF)
+		if (of_machine_is_compatible("ti,am335x-bone"))
+			davinci_mdio_update_dt_from_phymask(phy_mask);
+		#endif
+
 	} else {
 		/* desperately scan all phys */
 		dev_warn(data->dev, "no live phy, scanning all\n");
@@ -301,22 +333,139 @@ static int davinci_mdio_write(struct mii_bus *bus, int phy_id,
 }
 
 #if IS_ENABLED(CONFIG_OF)
-static int davinci_mdio_probe_dt(struct mdio_platform_data *data,
-			 struct platform_device *pdev)
+static int davinci_mdio_probe_dt(struct davinci_mdio_data *data,
+				 struct platform_device *pdev)
 {
 	struct device_node *node = pdev->dev.of_node;
 	u32 prop;
-
-	if (!node)
-		return -EINVAL;
+	int error;
+	int i;
+	struct gpio_desc *gpiod;
 
 	if (of_property_read_u32(node, "bus_freq", &prop)) {
 		dev_err(&pdev->dev, "Missing bus_freq property in the DT.\n");
-		return -EINVAL;
+		data->pdata = default_pdata;
+	} else {
+		data->pdata.bus_freq = prop;
 	}
-	data->bus_freq = prop;
+
+	i = of_gpio_named_count(node, "reset-gpios");
+	if (i > 0) {
+		data->num_gpios = i;
+		data->gpio_reset = devm_kcalloc(&pdev->dev, i,
+						sizeof(struct gpio_desc *),
+						GFP_KERNEL);
+		if (!data->gpio_reset)
+			return -ENOMEM;
+
+		for (i = 0; i < data->num_gpios; i++) {
+			gpiod = devm_gpiod_get_index(&pdev->dev, "reset", i,
+						     GPIOD_OUT_LOW);
+			if (IS_ERR(gpiod)) {
+				error = PTR_ERR(gpiod);
+				if (error == -ENOENT)
+					continue;
+				else
+					return error;
+			}
+			data->gpio_reset[i] = gpiod;
+		}
+
+		if (of_property_read_u32(node, "reset-delay-us",
+					 &data->reset_delay_us))
+			data->reset_delay_us = DEFAULT_GPIO_RESET_DELAY;
+
+		__davinci_gpio_reset(data);
+	}
 
 	return 0;
+}
+static void davinci_mdio_update_dt_from_phymask(u32 phy_mask)
+{
+	int i, len, skip;
+	u32 addr;
+	__be32 *old_phy_p, *phy_id_p;
+	struct property *phy_id_property = NULL;
+	struct device_node *node_p, *slave_p;
+
+	addr = 0;
+
+	for (i = 0; i < PHY_MAX_ADDR; i++) {
+		if ((phy_mask & (1 << i)) == 0) {
+			addr = (u32) i;
+		break;
+		}
+	}
+
+	for_each_compatible_node(node_p, NULL, "ti,cpsw") {
+		for_each_node_by_name(slave_p, "slave") {
+
+#if IS_ENABLED(CONFIG_OF_OVERLAY)
+			skip = 1;
+			// Hack, the overlay fixup "slave" doesn't have phy-mode...
+			old_phy_p = (__be32 *) of_get_property(slave_p, "phy-mode", &len);
+
+			if (len != (sizeof(__be32 *) * 1))
+			{
+				skip = 0;
+			}
+
+			if (skip) {
+#endif
+
+			old_phy_p = (__be32 *) of_get_property(slave_p, "phy_id", &len);
+
+			if (len != (sizeof(__be32 *) * 2))
+				goto err_out;
+
+			if (old_phy_p) {
+
+				phy_id_property = kzalloc(sizeof(*phy_id_property), GFP_KERNEL);
+
+				if (! phy_id_property)
+					goto err_out;
+
+				phy_id_property->length = len;
+				phy_id_property->name = kstrdup("phy_id", GFP_KERNEL);
+				phy_id_property->value = kzalloc(len, GFP_KERNEL);
+
+				if (! phy_id_property->name)
+					goto err_out;
+
+				if (! phy_id_property->value)
+					goto err_out;
+
+				memcpy(phy_id_property->value, old_phy_p, len);
+
+				phy_id_p = (__be32 *) phy_id_property->value + 1;
+
+				*phy_id_p = cpu_to_be32(addr);
+
+				of_update_property(slave_p, phy_id_property);
+				pr_info("davinci_mdio: dt: updated phy_id[%d] from phy_mask[%x]\n", addr, phy_mask);
+
+				++addr;
+			}
+#if IS_ENABLED(CONFIG_OF_OVERLAY)
+		}
+#endif
+		}
+	}
+
+	return;
+
+err_out:
+
+	if (phy_id_property) {
+		if (phy_id_property->name)
+			kfree(phy_id_property->name);
+
+	if (phy_id_property->value)
+		kfree(phy_id_property->value);
+
+	if (phy_id_property)
+		kfree(phy_id_property);
+	}
 }
 #endif
 
@@ -340,8 +489,9 @@ static int davinci_mdio_probe(struct platform_device *pdev)
 	}
 
 	if (dev->of_node) {
-		if (davinci_mdio_probe_dt(&data->pdata, pdev))
-			data->pdata = default_pdata;
+		ret = davinci_mdio_probe_dt(data, pdev);
+		if (ret)
+			return ret;
 		snprintf(data->bus->id, MII_BUS_ID_SIZE, "%s", pdev->name);
 	} else {
 		data->pdata = pdata ? (*pdata) : default_pdata;

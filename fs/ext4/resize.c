@@ -198,7 +198,7 @@ static struct ext4_new_flex_group_data *alloc_flex_gd(unsigned long flexbg_size)
 	if (flex_gd == NULL)
 		goto out3;
 
-	if (flexbg_size >= UINT_MAX / sizeof(struct ext4_new_flex_group_data))
+	if (flexbg_size >= UINT_MAX / sizeof(struct ext4_new_group_data))
 		goto out2;
 	flex_gd->count = flexbg_size;
 
@@ -1432,12 +1432,15 @@ static int ext4_flex_group_add(struct super_block *sb,
 		goto exit;
 	/*
 	 * We will always be modifying at least the superblock and  GDT
-	 * block.  If we are adding a group past the last current GDT block,
+	 * blocks.  If we are adding a group past the last current GDT block,
 	 * we will also modify the inode and the dindirect block.  If we
 	 * are adding a group with superblock/GDT backups  we will also
 	 * modify each of the reserved GDT dindirect blocks.
 	 */
-	credit = flex_gd->count * 4 + reserved_gdb;
+	credit = 3;	/* sb, resize inode, resize inode dindirect */
+	/* GDT blocks */
+	credit += 1 + DIV_ROUND_UP(flex_gd->count, EXT4_DESC_PER_BLOCK(sb));
+	credit += reserved_gdb;	/* Reserved GDT dindirect blocks */
 	handle = ext4_journal_start_sb(sb, EXT4_HT_RESIZE, credit);
 	if (IS_ERR(handle)) {
 		err = PTR_ERR(handle);

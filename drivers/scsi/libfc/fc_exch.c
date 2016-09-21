@@ -733,8 +733,6 @@ static bool fc_invoke_resp(struct fc_exch *ep, struct fc_seq *sp,
 	if (resp) {
 		resp(sp, fp, arg);
 		res = true;
-	} else if (!IS_ERR(fp)) {
-		fc_frame_free(fp);
 	}
 
 	spin_lock_bh(&ep->ex_lock);
@@ -816,10 +814,10 @@ static struct fc_exch *fc_exch_em_alloc(struct fc_lport *lport,
 	}
 	memset(ep, 0, sizeof(*ep));
 
-	cpu = get_cpu();
+	cpu = get_cpu_light();
 	pool = per_cpu_ptr(mp->pool, cpu);
 	spin_lock_bh(&pool->lock);
-	put_cpu();
+	put_cpu_light();
 
 	/* peek cache of free slot */
 	if (pool->left != FC_XID_UNKNOWN) {
@@ -1596,7 +1594,8 @@ static void fc_exch_recv_seq_resp(struct fc_exch_mgr *mp, struct fc_frame *fp)
 	 * If new exch resp handler is valid then call that
 	 * first.
 	 */
-	fc_invoke_resp(ep, sp, fp);
+	if (!fc_invoke_resp(ep, sp, fp))
+		fc_frame_free(fp);
 
 	fc_exch_release(ep);
 	return;
@@ -1695,7 +1694,8 @@ static void fc_exch_abts_resp(struct fc_exch *ep, struct fc_frame *fp)
 	fc_exch_hold(ep);
 	if (!rc)
 		fc_exch_delete(ep);
-	fc_invoke_resp(ep, sp, fp);
+	if (!fc_invoke_resp(ep, sp, fp))
+		fc_frame_free(fp);
 	if (has_rec)
 		fc_exch_timer_set(ep, ep->r_a_tov);
 	fc_exch_release(ep);

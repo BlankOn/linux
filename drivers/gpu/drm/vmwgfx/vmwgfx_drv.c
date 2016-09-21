@@ -25,6 +25,7 @@
  *
  **************************************************************************/
 #include <linux/module.h>
+#include <linux/console.h>
 
 #include <drm/drmP.h>
 #include "vmwgfx_drv.h"
@@ -134,7 +135,7 @@
  */
 
 #define VMW_IOCTL_DEF(ioctl, func, flags) \
-  [DRM_IOCTL_NR(DRM_IOCTL_##ioctl) - DRM_COMMAND_BASE] = {DRM_##ioctl, flags, func, DRM_IOCTL_##ioctl}
+  [DRM_IOCTL_NR(DRM_IOCTL_##ioctl) - DRM_COMMAND_BASE] = {DRM_IOCTL_##ioctl, flags, func}
 
 /**
  * Ioctl definitions.
@@ -1044,7 +1045,7 @@ static long vmw_generic_ioctl(struct file *filp, unsigned int cmd,
 		const struct drm_ioctl_desc *ioctl =
 			&vmw_ioctls[nr - DRM_COMMAND_BASE];
 
-		if (unlikely(ioctl->cmd_drv != cmd)) {
+		if (unlikely(ioctl->cmd != cmd)) {
 			DRM_ERROR("Invalid command format, ioctl %d\n",
 				  nr - DRM_COMMAND_BASE);
 			return -EINVAL;
@@ -1447,6 +1448,12 @@ static int vmw_probe(struct pci_dev *pdev, const struct pci_device_id *ent)
 static int __init vmwgfx_init(void)
 {
 	int ret;
+
+#ifdef CONFIG_VGA_CONSOLE
+	if (vgacon_text_force())
+		return -EINVAL;
+#endif
+
 	ret = drm_pci_init(&driver, &vmw_pci_driver);
 	if (ret)
 		DRM_ERROR("Failed initializing DRM.\n");
@@ -1457,6 +1464,9 @@ static void __exit vmwgfx_exit(void)
 {
 	drm_pci_exit(&driver, &vmw_pci_driver);
 }
+
+MODULE_INFO(vmw_patch, "ed7d78b2");
+MODULE_INFO(vmw_patch, "54c12bc3");
 
 module_init(vmwgfx_init);
 module_exit(vmwgfx_exit);

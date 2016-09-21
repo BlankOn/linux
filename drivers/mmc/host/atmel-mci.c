@@ -1304,7 +1304,7 @@ static void atmci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 
 	if (ios->clock) {
 		unsigned int clock_min = ~0U;
-		u32 clkdiv;
+		int clkdiv;
 
 		spin_lock_bh(&host->lock);
 		if (!host->mode_reg) {
@@ -1328,7 +1328,12 @@ static void atmci_set_ios(struct mmc_host *mmc, struct mmc_ios *ios)
 		/* Calculate clock divider */
 		if (host->caps.has_odd_clk_div) {
 			clkdiv = DIV_ROUND_UP(host->bus_hz, clock_min) - 2;
-			if (clkdiv > 511) {
+			if (clkdiv < 0) {
+				dev_warn(&mmc->class_dev,
+					 "clock %u too fast; using %lu\n",
+					 clock_min, host->bus_hz / 2);
+				clkdiv = 0;
+			} else if (clkdiv > 511) {
 				dev_warn(&mmc->class_dev,
 				         "clock %u too slow; using %lu\n",
 				         clock_min, host->bus_hz / (511 + 2));
@@ -2276,6 +2281,23 @@ static int atmci_configure_dma(struct atmel_mci *host)
 {
 	host->dma.chan = dma_request_slave_channel_reason(&host->pdev->dev,
 							"rxtx");
+
+	if (PTR_ERR(host->dma.chan) == -ENODEV) {
+		struct mci_platform_data *pdata = host->pdev->dev.platform_data;
+		dma_cap_mask_t mask;
+
+		if (!pdata || !pdata->dma_filter)
+			return -ENODEV;
+
+		dma_cap_zero(mask);
+		dma_cap_set(DMA_SLAVE, mask);
+
+		host->dma.chan = dma_request_channel(mask, pdata->dma_filter,
+						     pdata->dma_slave);
+		if (!host->dma.chan)
+			host->dma.chan = ERR_PTR(-ENODEV);
+	}
+
 	if (IS_ERR(host->dma.chan))
 		return PTR_ERR(host->dma.chan);
 

@@ -147,6 +147,7 @@ over:
 	}
 	return ERR_PTR(-ENFILE);
 }
+EXPORT_SYMBOL_GPL(get_empty_filp);
 
 /**
  * alloc_file - allocate and initialize a 'struct file'
@@ -168,10 +169,10 @@ struct file *alloc_file(struct path *path, fmode_t mode,
 	file->f_inode = path->dentry->d_inode;
 	file->f_mapping = path->dentry->d_inode->i_mapping;
 	if ((mode & FMODE_READ) &&
-	     likely(fop->read || fop->aio_read || fop->read_iter))
+	     likely(fop->read || fop->read_iter))
 		mode |= FMODE_CAN_READ;
 	if ((mode & FMODE_WRITE) &&
-	     likely(fop->write || fop->aio_write || fop->write_iter))
+	     likely(fop->write || fop->write_iter))
 		mode |= FMODE_CAN_WRITE;
 	file->f_mode = mode;
 	file->f_op = fop;
@@ -258,6 +259,7 @@ void flush_delayed_fput(void)
 {
 	delayed_fput(NULL);
 }
+EXPORT_SYMBOL_GPL(flush_delayed_fput);
 
 static DECLARE_DELAYED_WORK(delayed_fput_work, delayed_fput);
 
@@ -300,6 +302,7 @@ void __fput_sync(struct file *file)
 }
 
 EXPORT_SYMBOL(fput);
+EXPORT_SYMBOL_GPL(__fput_sync);
 
 void put_filp(struct file *file)
 {
@@ -308,6 +311,7 @@ void put_filp(struct file *file)
 		file_free(file);
 	}
 }
+EXPORT_SYMBOL_GPL(put_filp);
 
 void __init files_init(unsigned long mempages)
 { 

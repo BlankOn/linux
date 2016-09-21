@@ -234,7 +234,7 @@ static inline pgdval_t pgd_flags(pgd_t pgd)
 	return native_pgd_val(pgd) & PTE_FLAGS_MASK;
 }
 
-#if PAGETABLE_LEVELS > 3
+#if CONFIG_PGTABLE_LEVELS > 3
 typedef struct { pudval_t pud; } pud_t;
 
 static inline pud_t native_make_pud(pmdval_t val)
@@ -255,7 +255,7 @@ static inline pudval_t native_pud_val(pud_t pud)
 }
 #endif
 
-#if PAGETABLE_LEVELS > 2
+#if CONFIG_PGTABLE_LEVELS > 2
 typedef struct { pmdval_t pmd; } pmd_t;
 
 static inline pmd_t native_make_pmd(pmdval_t val)
@@ -337,20 +337,18 @@ static inline enum page_cache_mode pgprot2cachemode(pgprot_t pgprot)
 }
 static inline pgprot_t pgprot_4k_2_large(pgprot_t pgprot)
 {
+	pgprotval_t val = pgprot_val(pgprot);
 	pgprot_t new;
-	unsigned long val;
 
-	val = pgprot_val(pgprot);
 	pgprot_val(new) = (val & ~(_PAGE_PAT | _PAGE_PAT_LARGE)) |
 		((val & _PAGE_PAT) << (_PAGE_BIT_PAT_LARGE - _PAGE_BIT_PAT));
 	return new;
 }
 static inline pgprot_t pgprot_large_2_4k(pgprot_t pgprot)
 {
+	pgprotval_t val = pgprot_val(pgprot);
 	pgprot_t new;
-	unsigned long val;
 
-	val = pgprot_val(pgprot);
 	pgprot_val(new) = (val & ~(_PAGE_PAT | _PAGE_PAT_LARGE)) |
 			  ((val & _PAGE_PAT_LARGE) >>
 			   (_PAGE_BIT_PAT_LARGE - _PAGE_BIT_PAT));

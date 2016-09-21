@@ -34,15 +34,15 @@ static void omap_irq_update(struct drm_device *dev)
 	struct omap_drm_irq *irq;
 	uint32_t irqmask = priv->vblank_mask;
 
-	BUG_ON(!spin_is_locked(&list_lock));
+	assert_spin_locked(&list_lock);
 
 	list_for_each_entry(irq, &priv->irq_list, node)
 		irqmask |= irq->irqmask;
 
 	DBG("irqmask=%08x", irqmask);
 
-	dispc_write_irqenable(irqmask);
-	dispc_read_irqenable();        /* flush posted write */
+	priv->dispc_ops->write_irqenable(irqmask);
+	priv->dispc_ops->read_irqenable();        /* flush posted write */
 }
 
 void __omap_irq_register(struct drm_device *dev, struct omap_drm_irq *irq)
@@ -63,11 +63,13 @@ void __omap_irq_register(struct drm_device *dev, struct omap_drm_irq *irq)
 
 void omap_irq_register(struct drm_device *dev, struct omap_drm_irq *irq)
 {
-	dispc_runtime_get();
+	struct omap_drm_private *priv = dev->dev_private;
+
+	priv->dispc_ops->runtime_get();
 
 	__omap_irq_register(dev, irq);
 
-	dispc_runtime_put();
+	priv->dispc_ops->runtime_put();
 }
 
 void __omap_irq_unregister(struct drm_device *dev, struct omap_drm_irq *irq)
@@ -87,11 +89,13 @@ void __omap_irq_unregister(struct drm_device *dev, struct omap_drm_irq *irq)
 
 void omap_irq_unregister(struct drm_device *dev, struct omap_drm_irq *irq)
 {
-	dispc_runtime_get();
+	struct omap_drm_private *priv = dev->dev_private;
+
+	priv->dispc_ops->runtime_get();
 
 	__omap_irq_unregister(dev, irq);
 
-	dispc_runtime_put();
+	priv->dispc_ops->runtime_put();
 }
 
 struct omap_irq_wait {
@@ -152,12 +156,10 @@ int omap_irq_enable_vblank(struct drm_device *dev, int crtc_id)
 
 	DBG("dev=%p, crtc=%d", dev, crtc_id);
 
-	dispc_runtime_get();
 	spin_lock_irqsave(&list_lock, flags);
 	priv->vblank_mask |= pipe2vbl(crtc);
 	omap_irq_update(dev);
 	spin_unlock_irqrestore(&list_lock, flags);
-	dispc_runtime_put();
 
 	return 0;
 }
@@ -179,15 +181,13 @@ void omap_irq_disable_vblank(struct drm_device *dev, int crtc_id)
 
 	DBG("dev=%p, crtc=%d", dev, crtc_id);
 
-	dispc_runtime_get();
 	spin_lock_irqsave(&list_lock, flags);
 	priv->vblank_mask &= ~pipe2vbl(crtc);
 	omap_irq_update(dev);
 	spin_unlock_irqrestore(&list_lock, flags);
-	dispc_runtime_put();
 }
 
-irqreturn_t omap_irq_handler(int irq, void *arg)
+static irqreturn_t omap_irq_handler(int irq, void *arg)
 {
 	struct drm_device *dev = (struct drm_device *) arg;
 	struct omap_drm_private *priv = dev->dev_private;
@@ -196,9 +196,9 @@ irqreturn_t omap_irq_handler(int irq, void *arg)
 	unsigned int id;
 	u32 irqstatus;
 
-	irqstatus = dispc_read_irqstatus();
-	dispc_clear_irqstatus(irqstatus);
-	dispc_read_irqstatus();        /* flush posted write */
+	irqstatus = priv->dispc_ops->read_irqstatus();
+	priv->dispc_ops->clear_irqstatus(irqstatus);
+	priv->dispc_ops->read_irqstatus();        /* flush posted write */
 
 	VERB("irqs: %08x", irqstatus);
 
@@ -222,22 +222,28 @@ irqreturn_t omap_irq_handler(int irq, void *arg)
 	return IRQ_HANDLED;
 }
 
-void omap_irq_preinstall(struct drm_device *dev)
-{
-	DBG("dev=%p", dev);
-	dispc_runtime_get();
-	dispc_clear_irqstatus(0xffffffff);
-	dispc_runtime_put();
-}
+/*
+ * We need a special version, instead of just using drm_irq_install(),
+ * because we need to register the irq via omapdss.  Once omapdss and
+ * omapdrm are merged together we can assign the dispc hwmod data to
+ * ourselves and drop these and just use drm_irq_{install,uninstall}()
+ */
 
-int omap_irq_postinstall(struct drm_device *dev)
+int omap_drm_irq_install(struct drm_device *dev)
 {
 	struct omap_drm_private *priv = dev->dev_private;
 	struct omap_drm_irq *error_handler = &priv->error_handler;
-
-	DBG("dev=%p", dev);
+	int ret;
 
 	INIT_LIST_HEAD(&priv->irq_list);
+
+	priv->dispc_ops->runtime_get();
+	priv->dispc_ops->clear_irqstatus(0xffffffff);
+	priv->dispc_ops->runtime_put();
+
+	ret = priv->dispc_ops->request_irq(omap_irq_handler, dev);
+	if (ret < 0)
+		return ret;
 
 	error_handler->irq = omap_irq_error_handler;
 	error_handler->irqmask = DISPC_IRQ_OCP_ERR;
@@ -249,76 +255,23 @@ int omap_irq_postinstall(struct drm_device *dev)
 
 	omap_irq_register(dev, error_handler);
 
+	dev->irq_enabled = true;
+
 	return 0;
 }
 
-void omap_irq_uninstall(struct drm_device *dev)
+void omap_drm_irq_uninstall(struct drm_device *dev)
 {
-	DBG("dev=%p", dev);
-	// TODO prolly need to call drm_irq_uninstall() somewhere too
-}
-
-/*
- * We need a special version, instead of just using drm_irq_install(),
- * because we need to register the irq via omapdss.  Once omapdss and
- * omapdrm are merged together we can assign the dispc hwmod data to
- * ourselves and drop these and just use drm_irq_{install,uninstall}()
- */
-
-int omap_drm_irq_install(struct drm_device *dev)
-{
-	int ret;
-
-	mutex_lock(&dev->struct_mutex);
-
-	if (dev->irq_enabled) {
-		mutex_unlock(&dev->struct_mutex);
-		return -EBUSY;
-	}
-	dev->irq_enabled = true;
-	mutex_unlock(&dev->struct_mutex);
-
-	/* Before installing handler */
-	if (dev->driver->irq_preinstall)
-		dev->driver->irq_preinstall(dev);
-
-	ret = dispc_request_irq(dev->driver->irq_handler, dev);
-
-	if (ret < 0) {
-		mutex_lock(&dev->struct_mutex);
-		dev->irq_enabled = false;
-		mutex_unlock(&dev->struct_mutex);
-		return ret;
-	}
-
-	/* After installing handler */
-	if (dev->driver->irq_postinstall)
-		ret = dev->driver->irq_postinstall(dev);
-
-	if (ret < 0) {
-		mutex_lock(&dev->struct_mutex);
-		dev->irq_enabled = false;
-		mutex_unlock(&dev->struct_mutex);
-		dispc_free_irq(dev);
-	}
-
-	return ret;
-}
-
-int omap_drm_irq_uninstall(struct drm_device *dev)
-{
+	struct omap_drm_private *priv = dev->dev_private;
 	unsigned long irqflags;
-	bool irq_enabled;
 	int i;
 
-	mutex_lock(&dev->struct_mutex);
-	irq_enabled = dev->irq_enabled;
-	dev->irq_enabled = false;
-	mutex_unlock(&dev->struct_mutex);
+	if (!dev->irq_enabled)
+		return;
 
-	/*
-	 * Wake up any waiters so they don't hang.
-	 */
+	dev->irq_enabled = false;
+
+	/* Wake up any waiters so they don't hang. */
 	if (dev->num_crtcs) {
 		spin_lock_irqsave(&dev->vbl_lock, irqflags);
 		for (i = 0; i < dev->num_crtcs; i++) {
@@ -330,13 +283,5 @@ int omap_drm_irq_uninstall(struct drm_device *dev)
 		spin_unlock_irqrestore(&dev->vbl_lock, irqflags);
 	}
 
-	if (!irq_enabled)
-		return -EINVAL;
-
-	if (dev->driver->irq_uninstall)
-		dev->driver->irq_uninstall(dev);
-
-	dispc_free_irq(dev);
-
-	return 0;
+	priv->dispc_ops->free_irq(dev);
 }

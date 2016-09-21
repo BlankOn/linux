@@ -379,7 +379,7 @@ static void dispc_error_worker(struct work_struct *work)
 					"with video overlays disabled\n",
 					mgr->name);
 
-			dss_mgr_disable(mgr);
+			dss_mgr_disable(mgr->id);
 
 			for (j = 0; j < omap_dss_get_num_overlays(); ++j) {
 				struct omap_overlay *ovl;
@@ -390,7 +390,7 @@ static void dispc_error_worker(struct work_struct *work)
 					ovl->disable(ovl);
 			}
 
-			dss_mgr_enable(mgr);
+			dss_mgr_enable(mgr->id);
 		}
 	}
 
@@ -400,7 +400,7 @@ static void dispc_error_worker(struct work_struct *work)
 			struct omap_overlay_manager *mgr;
 
 			mgr = omap_dss_get_overlay_manager(i);
-			dss_mgr_disable(mgr);
+			dss_mgr_disable(mgr->id);
 		}
 	}
 
@@ -616,6 +616,13 @@ static void dispc_mgr_disable_digit_out(void)
 
 void dispc_mgr_enable_sync(enum omap_channel channel)
 {
+	struct omap_overlay_manager *mgr = omap_dss_get_overlay_manager(channel);
+
+	if (mgr->output->output_type == OMAP_DISPLAY_TYPE_HDMI) {
+		dispc_mgr_enable(channel, true);
+		return;
+	}
+
 	if (dss_mgr_is_lcd(channel))
 		dispc_mgr_enable_lcd_out(channel);
 	else if (channel == OMAP_DSS_CHANNEL_DIGIT)
@@ -626,6 +633,13 @@ void dispc_mgr_enable_sync(enum omap_channel channel)
 
 void dispc_mgr_disable_sync(enum omap_channel channel)
 {
+	struct omap_overlay_manager *mgr = omap_dss_get_overlay_manager(channel);
+
+	if (mgr->output->output_type == OMAP_DISPLAY_TYPE_HDMI) {
+		dispc_mgr_enable(channel, false);
+		return;
+	}
+
 	if (dss_mgr_is_lcd(channel))
 		dispc_mgr_disable_lcd_out(channel);
 	else if (channel == OMAP_DSS_CHANNEL_DIGIT)

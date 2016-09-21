@@ -38,6 +38,8 @@
 #include <linux/mailbox_controller.h>
 #include <linux/mailbox_client.h>
 
+#include "mailbox.h"
+
 #define MAILBOX_REVISION		0x000
 #define MAILBOX_MESSAGE(m)		(0x040 + 4 * (m))
 #define MAILBOX_FIFOSTATUS(m)		(0x080 + 4 * (m))
@@ -89,8 +91,10 @@ struct omap_mbox_device {
 	struct device *dev;
 	struct mutex cfg_lock;
 	void __iomem *mbox_base;
+	u32 *irq_ctx;
 	u32 num_users;
 	u32 num_fifos;
+	u32 intr_type;
 	struct omap_mbox **mboxes;
 	struct mbox_controller controller;
 	struct list_head elem;
@@ -106,6 +110,7 @@ struct omap_mbox_fifo_info {
 	int rx_irq;
 
 	const char *name;
+	bool send_no_irq;
 };
 
 struct omap_mbox {
@@ -119,6 +124,7 @@ struct omap_mbox {
 	u32			ctx[OMAP4_MBOX_NR_REGS];
 	u32			intr_type;
 	struct mbox_chan	*chan;
+	bool			send_no_irq;
 };
 
 /* global variables for the mailbox devices */
@@ -418,6 +424,9 @@ static int omap_mbox_startup(struct omap_mbox *mbox)
 		goto fail_request_irq;
 	}
 
+	if (mbox->send_no_irq)
+		mbox->chan->txdone_method = TXDONE_BY_ACK;
+
 	_omap_mbox_enable_irq(mbox, IRQ_RX);
 
 	return 0;
@@ -586,13 +595,27 @@ static void omap_mbox_chan_shutdown(struct mbox_chan *chan)
 	mutex_unlock(&mdev->cfg_lock);
 }
 
-static int omap_mbox_chan_send_data(struct mbox_chan *chan, void *data)
+static int omap_mbox_chan_send_noirq(struct omap_mbox *mbox, void *data)
 {
-	struct omap_mbox *mbox = mbox_chan_to_omap_mbox(chan);
 	int ret = -EBUSY;
 
-	if (!mbox)
-		return -EINVAL;
+	if (!mbox_fifo_full(mbox)) {
+		_omap_mbox_enable_irq(mbox, IRQ_RX);
+		mbox_fifo_write(mbox, (mbox_msg_t)data);
+		ret = 0;
+		_omap_mbox_disable_irq(mbox, IRQ_RX);
+
+		/* we must read and ack the interrupt directly from here */
+		mbox_fifo_read(mbox);
+		ack_mbox_irq(mbox, IRQ_RX);
+	}
+
+	return ret;
+}
+
+static int omap_mbox_chan_send(struct omap_mbox *mbox, void *data)
+{
+	int ret = -EBUSY;
 
 	if (!mbox_fifo_full(mbox)) {
 		mbox_fifo_write(mbox, (mbox_msg_t)data);
@@ -604,10 +627,72 @@ static int omap_mbox_chan_send_data(struct mbox_chan *chan, void *data)
 	return ret;
 }
 
-static struct mbox_chan_ops omap_mbox_chan_ops = {
+static int omap_mbox_chan_send_data(struct mbox_chan *chan, void *data)
+{
+	struct omap_mbox *mbox = mbox_chan_to_omap_mbox(chan);
+	int ret;
+
+	if (!mbox)
+		return -EINVAL;
+
+	if (mbox->send_no_irq)
+		ret = omap_mbox_chan_send_noirq(mbox, data);
+	else
+		ret = omap_mbox_chan_send(mbox, data);
+
+	return ret;
+}
+
+static const struct mbox_chan_ops omap_mbox_chan_ops = {
 	.startup        = omap_mbox_chan_startup,
 	.send_data      = omap_mbox_chan_send_data,
 	.shutdown       = omap_mbox_chan_shutdown,
+};
+
+#ifdef CONFIG_PM_SLEEP
+static int omap_mbox_suspend(struct device *dev)
+{
+	struct omap_mbox_device *mdev = dev_get_drvdata(dev);
+	u32 usr, fifo, reg;
+
+	if (pm_runtime_status_suspended(dev))
+		return 0;
+
+	for (fifo = 0; fifo < mdev->num_fifos; fifo++) {
+		if (mbox_read_reg(mdev, MAILBOX_MSGSTATUS(fifo))) {
+			dev_err(mdev->dev, "fifo %d has unexpected unread messages\n",
+				fifo);
+			return -EBUSY;
+		}
+	}
+
+	for (usr = 0; usr < mdev->num_users; usr++) {
+		reg = MAILBOX_IRQENABLE(mdev->intr_type, usr);
+		mdev->irq_ctx[usr] = mbox_read_reg(mdev, reg);
+	}
+
+	return 0;
+}
+
+static int omap_mbox_resume(struct device *dev)
+{
+	struct omap_mbox_device *mdev = dev_get_drvdata(dev);
+	u32 usr, reg;
+
+	if (pm_runtime_status_suspended(dev))
+		return 0;
+
+	for (usr = 0; usr < mdev->num_users; usr++) {
+		reg = MAILBOX_IRQENABLE(mdev->intr_type, usr);
+		mbox_write_reg(mdev, mdev->irq_ctx[usr], reg);
+	}
+
+	return 0;
+}
+#endif
+
+static const struct dev_pm_ops omap_mbox_pm_ops = {
+	SET_SYSTEM_SLEEP_PM_OPS(omap_mbox_suspend, omap_mbox_resume)
 };
 
 static const struct of_device_id omap_mailbox_of_match[] = {
@@ -639,18 +724,18 @@ static struct mbox_chan *omap_mbox_of_xlate(struct mbox_controller *controller,
 
 	mdev = container_of(controller, struct omap_mbox_device, controller);
 	if (WARN_ON(!mdev))
-		return NULL;
+		return ERR_PTR(-EINVAL);
 
 	node = of_find_node_by_phandle(phandle);
 	if (!node) {
 		pr_err("%s: could not find node phandle 0x%x\n",
 		       __func__, phandle);
-		return NULL;
+		return ERR_PTR(-ENODEV);
 	}
 
 	mbox = omap_mbox_device_find(mdev, node->name);
 	of_node_put(node);
-	return mbox ? mbox->chan : NULL;
+	return mbox ? mbox->chan : ERR_PTR(-ENOENT);
 }
 
 static int omap_mbox_probe(struct platform_device *pdev)
@@ -732,6 +817,9 @@ static int omap_mbox_probe(struct platform_device *pdev)
 			finfo->rx_usr = tmp[2];
 
 			finfo->name = child->name;
+
+			if (of_find_property(child, "ti,mbox-send-noirq", NULL))
+				finfo->send_no_irq = true;
 		} else {
 			finfo->tx_id = info->tx_id;
 			finfo->rx_id = info->rx_id;
@@ -755,6 +843,11 @@ static int omap_mbox_probe(struct platform_device *pdev)
 	mdev->mbox_base = devm_ioremap_resource(&pdev->dev, mem);
 	if (IS_ERR(mdev->mbox_base))
 		return PTR_ERR(mdev->mbox_base);
+
+	mdev->irq_ctx = devm_kzalloc(&pdev->dev, num_users * sizeof(u32),
+				     GFP_KERNEL);
+	if (!mdev->irq_ctx)
+		return -ENOMEM;
 
 	/* allocate one extra for marking end of list */
 	list = devm_kzalloc(&pdev->dev, (info_count + 1) * sizeof(*list),
@@ -791,6 +884,7 @@ static int omap_mbox_probe(struct platform_device *pdev)
 		fifo->irqstatus = MAILBOX_IRQSTATUS(intr_type, finfo->rx_usr);
 		fifo->irqdisable = MAILBOX_IRQDISABLE(intr_type, finfo->rx_usr);
 
+		mbox->send_no_irq = finfo->send_no_irq;
 		mbox->intr_type = intr_type;
 
 		mbox->parent = mdev;
@@ -807,6 +901,7 @@ static int omap_mbox_probe(struct platform_device *pdev)
 	mdev->dev = &pdev->dev;
 	mdev->num_users = num_users;
 	mdev->num_fifos = num_fifos;
+	mdev->intr_type  = intr_type;
 	mdev->mboxes = list;
 
 	/* OMAP does not have a Tx-Done IRQ, but rather a Tx-Ready IRQ */
@@ -864,6 +959,7 @@ static struct platform_driver omap_mbox_driver = {
 	.remove	= omap_mbox_remove,
 	.driver	= {
 		.name = "omap-mailbox",
+		.pm = &omap_mbox_pm_ops,
 		.of_match_table = of_match_ptr(omap_mailbox_of_match),
 	},
 };

@@ -18,7 +18,7 @@ struct call_single_data {
 	struct llist_node llist;
 	smp_call_func_t func;
 	void *info;
-	u16 flags;
+	unsigned int flags;
 };
 
 /* total number of cpus in this system (may exceed NR_CPUS) */
@@ -184,6 +184,9 @@ static inline void smp_init(void) { }
 
 #define get_cpu()		({ preempt_disable(); smp_processor_id(); })
 #define put_cpu()		preempt_enable()
+
+#define get_cpu_light()		({ migrate_disable(); smp_processor_id(); })
+#define put_cpu_light()		migrate_enable()
 
 /*
  * Callback to arch code if there's nosmp or maxcpus=0 on the

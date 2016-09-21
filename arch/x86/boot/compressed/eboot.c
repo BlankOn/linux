@@ -667,6 +667,7 @@ setup_gop32(struct screen_info *si, efi_guid_t *proto,
 		bool conout_found = false;
 		void *dummy = NULL;
 		u32 h = handles[i];
+		u32 current_fb_base;
 
 		status = efi_call_early(handle_protocol, h,
 					proto, (void **)&gop32);
@@ -678,7 +679,7 @@ setup_gop32(struct screen_info *si, efi_guid_t *proto,
 		if (status == EFI_SUCCESS)
 			conout_found = true;
 
-		status = __gop_query32(gop32, &info, &size, &fb_base);
+		status = __gop_query32(gop32, &info, &size, &current_fb_base);
 		if (status == EFI_SUCCESS && (!first_gop || conout_found)) {
 			/*
 			 * Systems that use the UEFI Console Splitter may
@@ -692,6 +693,7 @@ setup_gop32(struct screen_info *si, efi_guid_t *proto,
 			pixel_format = info->pixel_format;
 			pixel_info = info->pixel_information;
 			pixels_per_scan_line = info->pixels_per_scan_line;
+			fb_base = current_fb_base;
 
 			/*
 			 * Once we've found a GOP supporting ConOut,
@@ -770,6 +772,7 @@ setup_gop64(struct screen_info *si, efi_guid_t *proto,
 		bool conout_found = false;
 		void *dummy = NULL;
 		u64 h = handles[i];
+		u32 current_fb_base;
 
 		status = efi_call_early(handle_protocol, h,
 					proto, (void **)&gop64);
@@ -781,7 +784,7 @@ setup_gop64(struct screen_info *si, efi_guid_t *proto,
 		if (status == EFI_SUCCESS)
 			conout_found = true;
 
-		status = __gop_query64(gop64, &info, &size, &fb_base);
+		status = __gop_query64(gop64, &info, &size, &current_fb_base);
 		if (status == EFI_SUCCESS && (!first_gop || conout_found)) {
 			/*
 			 * Systems that use the UEFI Console Splitter may
@@ -795,6 +798,7 @@ setup_gop64(struct screen_info *si, efi_guid_t *proto,
 			pixel_format = info->pixel_format;
 			pixel_info = info->pixel_information;
 			pixels_per_scan_line = info->pixels_per_scan_line;
+			fb_base = current_fb_base;
 
 			/*
 			 * Once we've found a GOP supporting ConOut,
@@ -1109,6 +1113,8 @@ struct boot_params *make_boot_params(struct efi_config *c)
 	if (!cmdline_ptr)
 		goto fail;
 	hdr->cmd_line_ptr = (unsigned long)cmdline_ptr;
+	/* Fill in upper bits of command line address, NOP on 32 bit  */
+	boot_params->ext_cmd_line_ptr = (u64)(unsigned long)cmdline_ptr >> 32;
 
 	hdr->ramdisk_image = 0;
 	hdr->ramdisk_size = 0;
@@ -1190,6 +1196,10 @@ static efi_status_t setup_e820(struct boot_params *params,
 		efi_memory_desc_t *d;
 		unsigned int e820_type = 0;
 		unsigned long m = efi->efi_memmap;
+
+#ifdef CONFIG_X86_64
+		m |= (u64)efi->efi_memmap_hi << 32;
+#endif
 
 		d = (efi_memory_desc_t *)(m + (i * efi->efi_memdesc_size));
 		switch (d->type) {

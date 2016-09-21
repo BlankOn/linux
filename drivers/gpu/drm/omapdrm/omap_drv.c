@@ -17,11 +17,15 @@
  * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
-#include "omap_drv.h"
+#include <linux/wait.h>
 
-#include "drm_crtc_helper.h"
-#include "drm_fb_helper.h"
+#include <drm/drm_atomic.h>
+#include <drm/drm_atomic_helper.h>
+#include <drm/drm_crtc_helper.h>
+#include <drm/drm_fb_helper.h>
+
 #include "omap_dmm_tiler.h"
+#include "omap_drv.h"
 
 #define DRIVER_NAME		MODULE_NAME
 #define DRIVER_DESC		"OMAP DRM"
@@ -55,9 +59,153 @@ static void omap_fb_output_poll_changed(struct drm_device *dev)
 		drm_fb_helper_hotplug_event(priv->fbdev);
 }
 
+struct omap_atomic_state_commit {
+	struct work_struct work;
+	struct drm_device *dev;
+	struct drm_atomic_state *state;
+	u32 crtcs;
+};
+
+static void omap_atomic_wait_for_completion(struct drm_device *dev,
+					    struct drm_atomic_state *old_state)
+{
+	struct drm_crtc_state *old_crtc_state;
+	struct drm_crtc *crtc;
+	unsigned int i;
+	int ret;
+
+	for_each_crtc_in_state(old_state, crtc, old_crtc_state, i) {
+		if (!crtc->state->enable)
+			continue;
+
+		ret = omap_crtc_wait_pending(crtc);
+
+		if (!ret)
+			dev_warn(dev->dev,
+				 "atomic complete timeout (pipe %u)!\n", i);
+	}
+}
+
+static void omap_atomic_complete(struct omap_atomic_state_commit *commit)
+{
+	struct drm_device *dev = commit->dev;
+	struct omap_drm_private *priv = dev->dev_private;
+	struct drm_atomic_state *old_state = commit->state;
+
+	/* Apply the atomic update. */
+	priv->dispc_ops->runtime_get();
+
+	drm_atomic_helper_commit_modeset_disables(dev, old_state);
+	drm_atomic_helper_commit_planes(dev, old_state);
+	drm_atomic_helper_commit_modeset_enables(dev, old_state);
+
+	omap_atomic_wait_for_completion(dev, old_state);
+
+	drm_atomic_helper_cleanup_planes(dev, old_state);
+
+	priv->dispc_ops->runtime_put();
+
+	drm_atomic_state_free(old_state);
+
+	/* Complete the commit, wake up any waiter. */
+	spin_lock(&priv->commit.lock);
+	priv->commit.pending &= ~commit->crtcs;
+	spin_unlock(&priv->commit.lock);
+
+	wake_up_all(&priv->commit.wait);
+
+	kfree(commit);
+}
+
+static void omap_atomic_work(struct work_struct *work)
+{
+	struct omap_atomic_state_commit *commit =
+		container_of(work, struct omap_atomic_state_commit, work);
+
+	omap_atomic_complete(commit);
+}
+
+static bool omap_atomic_is_pending(struct omap_drm_private *priv,
+				   struct omap_atomic_state_commit *commit)
+{
+	bool pending;
+
+	spin_lock(&priv->commit.lock);
+	pending = priv->commit.pending & commit->crtcs;
+	spin_unlock(&priv->commit.lock);
+
+	return pending;
+}
+
+static int omap_atomic_commit(struct drm_device *dev,
+			      struct drm_atomic_state *state, bool async)
+{
+	struct omap_drm_private *priv = dev->dev_private;
+	struct omap_atomic_state_commit *commit;
+	unsigned long flags;
+	unsigned int i;
+	int ret;
+
+	ret = drm_atomic_helper_prepare_planes(dev, state);
+	if (ret)
+		return ret;
+
+	/* Allocate the commit object. */
+	commit = kzalloc(sizeof(*commit), GFP_KERNEL);
+	if (commit == NULL) {
+		ret = -ENOMEM;
+		goto error;
+	}
+
+	INIT_WORK(&commit->work, omap_atomic_work);
+	commit->dev = dev;
+	commit->state = state;
+
+	/* Wait until all affected CRTCs have completed previous commits and
+	 * mark them as pending.
+	 */
+	for (i = 0; i < dev->mode_config.num_crtc; ++i) {
+		if (state->crtcs[i])
+			commit->crtcs |= 1 << drm_crtc_index(state->crtcs[i]);
+	}
+
+	wait_event(priv->commit.wait, !omap_atomic_is_pending(priv, commit));
+
+	spin_lock(&priv->commit.lock);
+	priv->commit.pending |= commit->crtcs;
+	spin_unlock(&priv->commit.lock);
+
+	/* Keep track of all CRTC events to unlink them in preclose(). */
+	spin_lock_irqsave(&dev->event_lock, flags);
+	for (i = 0; i < dev->mode_config.num_crtc; ++i) {
+		struct drm_crtc_state *cstate = state->crtc_states[i];
+
+		if (cstate && cstate->event)
+			list_add_tail(&cstate->event->base.link,
+				      &priv->commit.events);
+	}
+	spin_unlock_irqrestore(&dev->event_lock, flags);
+
+	/* Swap the state, this is the point of no return. */
+	drm_atomic_helper_swap_state(dev, state);
+
+	if (async)
+		schedule_work(&commit->work);
+	else
+		omap_atomic_complete(commit);
+
+	return 0;
+
+error:
+	drm_atomic_helper_cleanup_planes(dev, state);
+	return ret;
+}
+
 static const struct drm_mode_config_funcs omap_mode_config_funcs = {
 	.fb_create = omap_framebuffer_create,
 	.output_poll_changed = omap_fb_output_poll_changed,
+	.atomic_check = drm_atomic_helper_check,
+	.atomic_commit = omap_atomic_commit,
 };
 
 static int get_connector_type(struct omap_dss_device *dssdev)
@@ -94,11 +242,38 @@ static void omap_disconnect_dssdevs(void)
 		dssdev->driver->disconnect(dssdev);
 }
 
+static bool dssdev_with_alias_exists(const char *alias)
+{
+	struct omap_dss_device *dssdev = NULL;
+
+	for_each_dss_dev(dssdev) {
+		if (strcmp(alias, dssdev->alias) == 0) {
+			omap_dss_put_device(dssdev);
+			return true;
+		}
+	}
+
+	return false;
+}
+
 static int omap_connect_dssdevs(void)
 {
 	int r;
 	struct omap_dss_device *dssdev = NULL;
 	bool no_displays = true;
+	struct device_node *aliases;
+	struct property *pp;
+
+	aliases = of_find_node_by_path("/aliases");
+	if (aliases) {
+		for_each_property_of_node(aliases, pp) {
+			if (strncmp(pp->name, "display", 7) != 0)
+				continue;
+
+			if (dssdev_with_alias_exists(pp->name) == false)
+				return -EPROBE_DEFER;
+		}
+	}
 
 	for_each_dss_dev(dssdev) {
 		r = dssdev->driver->connect(dssdev);
@@ -128,18 +303,108 @@ cleanup:
 	return r;
 }
 
+static int omap_modeset_create_crtc(struct drm_device *dev, int id,
+				    enum omap_channel channel)
+{
+	struct omap_drm_private *priv = dev->dev_private;
+	struct drm_plane *plane;
+	struct drm_crtc *crtc;
+
+	plane = omap_plane_init(dev, id, DRM_PLANE_TYPE_PRIMARY);
+	if (IS_ERR(plane))
+		return PTR_ERR(plane);
+
+	crtc = omap_crtc_init(dev, plane, channel, id);
+
+	BUG_ON(priv->num_crtcs >= ARRAY_SIZE(priv->crtcs));
+	priv->crtcs[id] = crtc;
+	priv->num_crtcs++;
+
+	priv->planes[id] = plane;
+	priv->num_planes++;
+
+	return 0;
+}
+
+static int omap_modeset_init_properties(struct drm_device *dev)
+{
+	struct omap_drm_private *priv = dev->dev_private;
+
+	static const struct drm_prop_enum_list trans_key_mode_list[] = {
+		{ 0, "disable"},
+		{ 1, "gfx-dst"},
+		{ 2, "vid-src"},
+	};
+
+	/* plane properties */
+
+	if (priv->has_dmm) {
+		dev->mode_config.rotation_property =
+			drm_mode_create_rotation_property(dev,
+				BIT(DRM_ROTATE_0) | BIT(DRM_ROTATE_90) |
+				BIT(DRM_ROTATE_180) | BIT(DRM_ROTATE_270) |
+				BIT(DRM_REFLECT_X) | BIT(DRM_REFLECT_Y));
+		if (!dev->mode_config.rotation_property)
+			return -ENOMEM;
+	}
+
+	priv->zorder_prop = drm_property_create_range(dev, 0, "zorder", 0, 3);
+	if (!priv->zorder_prop)
+		return -ENOMEM;
+
+	priv->global_alpha_prop = drm_property_create_range(dev, 0,
+		"global_alpha", 0, 255);
+	if (!priv->global_alpha_prop)
+		return -ENOMEM;
+
+	priv->pre_mult_alpha_prop = drm_property_create_bool(dev, 0,
+		"pre_mult_alpha");
+	if (!priv->pre_mult_alpha_prop)
+		return -ENOMEM;
+
+	/* crtc properties */
+
+	priv->trans_key_mode_prop = drm_property_create_enum(dev, 0,
+		"trans-key-mode",
+		trans_key_mode_list, ARRAY_SIZE(trans_key_mode_list));
+	if (!priv->trans_key_mode_prop)
+		return -ENOMEM;
+
+	priv->trans_key_prop = drm_property_create_range(dev, 0, "trans-key",
+		0, 0xffffff);
+	if (!priv->trans_key_prop)
+		return -ENOMEM;
+
+	priv->background_color_prop = drm_property_create_range(dev, 0,
+		"background", 0, 0xffffff);
+	if (!priv->background_color_prop)
+		return -ENOMEM;
+
+	priv->alpha_blender_prop = drm_property_create_bool(dev, 0,
+		"alpha_blender");
+	if (!priv->alpha_blender_prop)
+		return -ENOMEM;
+
+	return 0;
+}
+
 static int omap_modeset_init(struct drm_device *dev)
 {
 	struct omap_drm_private *priv = dev->dev_private;
 	struct omap_dss_device *dssdev = NULL;
-	int num_ovls = dss_feat_get_num_ovls();
-	int num_mgrs = dss_feat_get_num_mgrs();
+	int num_ovls = priv->dispc_ops->get_num_ovls();
+	int num_mgrs = priv->dispc_ops->get_num_mgrs();
 	int num_crtcs;
 	int i, id = 0;
+	int ret;
 
 	drm_mode_config_init(dev);
 
 	omap_drm_irq_install(dev);
+
+	ret = omap_modeset_init_properties(dev);
+	if (ret < 0)
+		return ret;
 
 	/*
 	 * We usually don't want to create a CRTC for each manager, at least
@@ -155,7 +420,7 @@ static int omap_modeset_init(struct drm_device *dev)
 		struct drm_connector *connector;
 		struct drm_encoder *encoder;
 		enum omap_channel channel;
-		struct omap_overlay_manager *mgr;
+		struct omap_dss_device *out;
 
 		if (!omapdss_device_is_connected(dssdev))
 			continue;
@@ -202,25 +467,22 @@ static int omap_modeset_init(struct drm_device *dev)
 		 * not considered.
 		 */
 
-		mgr = omapdss_find_mgr_from_display(dssdev);
-		channel = mgr->id;
+		out = omapdss_find_output_from_display(dssdev);
+		channel = out->dispc_channel;
+		omap_dss_put_device(out);
+
 		/*
 		 * if this channel hasn't already been taken by a previously
 		 * allocated crtc, we create a new crtc for it
 		 */
 		if (!channel_used(dev, channel)) {
-			struct drm_plane *plane;
-			struct drm_crtc *crtc;
-
-			plane = omap_plane_init(dev, id, true);
-			crtc = omap_crtc_init(dev, plane, channel, id);
-
-			BUG_ON(priv->num_crtcs >= ARRAY_SIZE(priv->crtcs));
-			priv->crtcs[id] = crtc;
-			priv->num_crtcs++;
-
-			priv->planes[id] = plane;
-			priv->num_planes++;
+			ret = omap_modeset_create_crtc(dev, id, channel);
+			if (ret < 0) {
+				dev_err(dev->dev,
+					"could not create CRTC (channel %u)\n",
+					channel);
+				return ret;
+			}
 
 			id++;
 		}
@@ -234,26 +496,8 @@ static int omap_modeset_init(struct drm_device *dev)
 
 		/* find a free manager for this crtc */
 		for (i = 0; i < num_mgrs; i++) {
-			if (!channel_used(dev, i)) {
-				struct drm_plane *plane;
-				struct drm_crtc *crtc;
-
-				plane = omap_plane_init(dev, id, true);
-				crtc = omap_crtc_init(dev, plane, i, id);
-
-				BUG_ON(priv->num_crtcs >=
-					ARRAY_SIZE(priv->crtcs));
-
-				priv->crtcs[id] = crtc;
-				priv->num_crtcs++;
-
-				priv->planes[id] = plane;
-				priv->num_planes++;
-
+			if (!channel_used(dev, i))
 				break;
-			} else {
-				continue;
-			}
 		}
 
 		if (i == num_mgrs) {
@@ -261,13 +505,24 @@ static int omap_modeset_init(struct drm_device *dev)
 			dev_err(dev->dev, "no managers left for crtc\n");
 			return -ENOMEM;
 		}
+
+		ret = omap_modeset_create_crtc(dev, id, i);
+		if (ret < 0) {
+			dev_err(dev->dev,
+				"could not create CRTC (channel %u)\n", i);
+			return ret;
+		}
 	}
 
 	/*
 	 * Create normal planes for the remaining overlays:
 	 */
 	for (; id < num_ovls; id++) {
-		struct drm_plane *plane = omap_plane_init(dev, id, false);
+		struct drm_plane *plane;
+
+		plane = omap_plane_init(dev, id, DRM_PLANE_TYPE_OVERLAY);
+		if (IS_ERR(plane))
+			return PTR_ERR(plane);
 
 		BUG_ON(priv->num_planes >= ARRAY_SIZE(priv->planes));
 		priv->planes[priv->num_planes++] = plane;
@@ -286,14 +541,13 @@ static int omap_modeset_init(struct drm_device *dev)
 		for (id = 0; id < priv->num_crtcs; id++) {
 			struct drm_crtc *crtc = priv->crtcs[id];
 			enum omap_channel crtc_channel;
-			enum omap_dss_output_id supported_outputs;
 
 			crtc_channel = omap_crtc_channel(crtc);
-			supported_outputs =
-				dss_feat_get_supported_outputs(crtc_channel);
 
-			if (supported_outputs & output->id)
+			if (output->dispc_channel == crtc_channel) {
 				encoder->possible_crtcs |= (1 << id);
+				break;
+			}
 		}
 
 		omap_dss_put_device(output);
@@ -313,6 +567,8 @@ static int omap_modeset_init(struct drm_device *dev)
 	dev->mode_config.max_height = 2048;
 
 	dev->mode_config.funcs = &omap_mode_config_funcs;
+
+	drm_mode_config_reset(dev);
 
 	return 0;
 }
@@ -361,14 +617,19 @@ static int ioctl_set_param(struct drm_device *dev, void *data,
 	return 0;
 }
 
+#define OMAP_BO_USER_MASK	0x00ffffff	/* flags settable by userspace */
+
 static int ioctl_gem_new(struct drm_device *dev, void *data,
 		struct drm_file *file_priv)
 {
 	struct drm_omap_gem_new *args = data;
+	u32 flags = args->flags & OMAP_BO_USER_MASK;
+
 	VERB("%p:%p: size=0x%08x, flags=%08x", dev, file_priv,
-			args->size.bytes, args->flags);
-	return omap_gem_new_handle(dev, file_priv, args->size,
-			args->flags, &args->handle);
+	     args->size.bytes, flags);
+
+	return omap_gem_new_handle(dev, file_priv, args->size, flags,
+				   &args->handle);
 }
 
 static int ioctl_gem_cpu_prep(struct drm_device *dev, void *data,
@@ -466,6 +727,7 @@ static int dev_load(struct drm_device *dev, unsigned long flags)
 {
 	struct omap_drm_platform_data *pdata = dev->dev->platform_data;
 	struct omap_drm_private *priv;
+	unsigned int i;
 	int ret;
 
 	DBG("load: dev=%p", dev);
@@ -476,10 +738,16 @@ static int dev_load(struct drm_device *dev, unsigned long flags)
 
 	priv->omaprev = pdata->omaprev;
 
+	priv->dispc_ops = dispc_get_ops();
+
 	dev->dev_private = priv;
 
 	priv->wq = alloc_ordered_workqueue("omapdrm", 0);
+	init_waitqueue_head(&priv->commit.wait);
+	spin_lock_init(&priv->commit.lock);
+	INIT_LIST_HEAD(&priv->commit.events);
 
+	spin_lock_init(&priv->list_lock);
 	INIT_LIST_HEAD(&priv->obj_list);
 
 	omap_gem_init(dev);
@@ -492,9 +760,13 @@ static int dev_load(struct drm_device *dev, unsigned long flags)
 		return ret;
 	}
 
+	/* Initialize vblank handling, start with all CRTCs disabled. */
 	ret = drm_vblank_init(dev, priv->num_crtcs);
 	if (ret)
 		dev_warn(dev->dev, "could not init vblank\n");
+
+	for (i = 0; i < priv->num_crtcs; i++)
+		drm_crtc_vblank_off(priv->crtcs[i]);
 
 	priv->fbdev = omap_fbdev_init(dev);
 	if (!priv->fbdev) {
@@ -507,23 +779,30 @@ static int dev_load(struct drm_device *dev, unsigned long flags)
 
 	drm_kms_helper_poll_init(dev);
 
+	if (priv->dispc_ops->has_writeback()) {
+		ret = wbm2m_init(dev);
+		if (ret)
+			dev_warn(dev->dev, "failed to initialize writeback\n");
+		else
+			priv->wb_initialized = true;
+	}
+
 	return 0;
 }
 
 static int dev_unload(struct drm_device *dev)
 {
 	struct omap_drm_private *priv = dev->dev_private;
-	int i;
 
 	DBG("unload: dev=%p", dev);
 
+	if (priv->wb_initialized)
+		wbm2m_cleanup(dev);
+
 	drm_kms_helper_poll_fini(dev);
 
-	omap_fbdev_free(dev);
-
-	/* flush crtcs so the fbs get released */
-	for (i = 0; i < priv->num_crtcs; i++)
-		omap_crtc_flush(priv->crtcs[i]);
+	if (priv->fbdev)
+		omap_fbdev_free(dev);
 
 	omap_modeset_free(dev);
 	omap_gem_deinit(dev);
@@ -570,7 +849,7 @@ static void dev_lastclose(struct drm_device *dev)
 
 	DBG("lastclose: dev=%p", dev);
 
-	if (priv->rotation_prop) {
+	if (dev->mode_config.rotation_property) {
 		/* need to restore default rotation state.. not sure
 		 * if there is a cleaner way to restore properties to
 		 * default state?  Maybe a flag that properties should
@@ -579,23 +858,42 @@ static void dev_lastclose(struct drm_device *dev)
 		 */
 		for (i = 0; i < priv->num_crtcs; i++) {
 			drm_object_property_set_value(&priv->crtcs[i]->base,
-					priv->rotation_prop, 0);
+					dev->mode_config.rotation_property, 0);
 		}
 
 		for (i = 0; i < priv->num_planes; i++) {
 			drm_object_property_set_value(&priv->planes[i]->base,
-					priv->rotation_prop, 0);
+					dev->mode_config.rotation_property, 0);
 		}
 	}
 
-	ret = drm_fb_helper_restore_fbdev_mode_unlocked(priv->fbdev);
-	if (ret)
-		DBG("failed to restore crtc mode");
+	if (priv->fbdev) {
+		ret = drm_fb_helper_restore_fbdev_mode_unlocked(priv->fbdev);
+		if (ret)
+			DBG("failed to restore crtc mode");
+	}
 }
 
 static void dev_preclose(struct drm_device *dev, struct drm_file *file)
 {
+	struct omap_drm_private *priv = dev->dev_private;
+	struct drm_pending_event *event;
+	unsigned long flags;
+
 	DBG("preclose: dev=%p", dev);
+
+	/*
+	 * Unlink all pending CRTC events to make sure they won't be queued up
+	 * by a pending asynchronous commit.
+	 */
+	spin_lock_irqsave(&dev->event_lock, flags);
+	list_for_each_entry(event, &priv->commit.events, link) {
+		if (event->file_priv == file) {
+			file->event_space += event->event->length;
+			event->file_priv = NULL;
+		}
+	}
+	spin_unlock_irqrestore(&dev->event_lock, flags);
 }
 
 static void dev_postclose(struct drm_device *dev, struct drm_file *file)
@@ -610,73 +908,52 @@ static const struct vm_operations_struct omap_gem_vm_ops = {
 };
 
 static const struct file_operations omapdriver_fops = {
-		.owner = THIS_MODULE,
-		.open = drm_open,
-		.unlocked_ioctl = drm_ioctl,
-		.release = drm_release,
-		.mmap = omap_gem_mmap,
-		.poll = drm_poll,
-		.read = drm_read,
-		.llseek = noop_llseek,
+	.owner = THIS_MODULE,
+	.open = drm_open,
+	.unlocked_ioctl = drm_ioctl,
+	.release = drm_release,
+	.mmap = omap_gem_mmap,
+	.poll = drm_poll,
+	.read = drm_read,
+	.llseek = noop_llseek,
 };
 
 static struct drm_driver omap_drm_driver = {
-		.driver_features =
-				DRIVER_HAVE_IRQ | DRIVER_MODESET | DRIVER_GEM | DRIVER_PRIME,
-		.load = dev_load,
-		.unload = dev_unload,
-		.open = dev_open,
-		.lastclose = dev_lastclose,
-		.preclose = dev_preclose,
-		.postclose = dev_postclose,
-		.set_busid = drm_platform_set_busid,
-		.get_vblank_counter = drm_vblank_count,
-		.enable_vblank = omap_irq_enable_vblank,
-		.disable_vblank = omap_irq_disable_vblank,
-		.irq_preinstall = omap_irq_preinstall,
-		.irq_postinstall = omap_irq_postinstall,
-		.irq_uninstall = omap_irq_uninstall,
-		.irq_handler = omap_irq_handler,
+	.driver_features = DRIVER_MODESET | DRIVER_GEM  | DRIVER_PRIME |
+		DRIVER_ATOMIC,
+	.load = dev_load,
+	.unload = dev_unload,
+	.open = dev_open,
+	.lastclose = dev_lastclose,
+	.preclose = dev_preclose,
+	.postclose = dev_postclose,
+	.set_busid = drm_platform_set_busid,
+	.get_vblank_counter = drm_vblank_count,
+	.enable_vblank = omap_irq_enable_vblank,
+	.disable_vblank = omap_irq_disable_vblank,
 #ifdef CONFIG_DEBUG_FS
-		.debugfs_init = omap_debugfs_init,
-		.debugfs_cleanup = omap_debugfs_cleanup,
+	.debugfs_init = omap_debugfs_init,
+	.debugfs_cleanup = omap_debugfs_cleanup,
 #endif
-		.prime_handle_to_fd = drm_gem_prime_handle_to_fd,
-		.prime_fd_to_handle = drm_gem_prime_fd_to_handle,
-		.gem_prime_export = omap_gem_prime_export,
-		.gem_prime_import = omap_gem_prime_import,
-		.gem_free_object = omap_gem_free_object,
-		.gem_vm_ops = &omap_gem_vm_ops,
-		.dumb_create = omap_gem_dumb_create,
-		.dumb_map_offset = omap_gem_dumb_map_offset,
-		.dumb_destroy = drm_gem_dumb_destroy,
-		.ioctls = ioctls,
-		.num_ioctls = DRM_OMAP_NUM_IOCTLS,
-		.fops = &omapdriver_fops,
-		.name = DRIVER_NAME,
-		.desc = DRIVER_DESC,
-		.date = DRIVER_DATE,
-		.major = DRIVER_MAJOR,
-		.minor = DRIVER_MINOR,
-		.patchlevel = DRIVER_PATCHLEVEL,
+	.prime_handle_to_fd = drm_gem_prime_handle_to_fd,
+	.prime_fd_to_handle = drm_gem_prime_fd_to_handle,
+	.gem_prime_export = omap_gem_prime_export,
+	.gem_prime_import = omap_gem_prime_import,
+	.gem_free_object = omap_gem_free_object,
+	.gem_vm_ops = &omap_gem_vm_ops,
+	.dumb_create = omap_gem_dumb_create,
+	.dumb_map_offset = omap_gem_dumb_map_offset,
+	.dumb_destroy = drm_gem_dumb_destroy,
+	.ioctls = ioctls,
+	.num_ioctls = DRM_OMAP_NUM_IOCTLS,
+	.fops = &omapdriver_fops,
+	.name = DRIVER_NAME,
+	.desc = DRIVER_DESC,
+	.date = DRIVER_DATE,
+	.major = DRIVER_MAJOR,
+	.minor = DRIVER_MINOR,
+	.patchlevel = DRIVER_PATCHLEVEL,
 };
-
-static int pdev_suspend(struct platform_device *pDevice, pm_message_t state)
-{
-	DBG("");
-	return 0;
-}
-
-static int pdev_resume(struct platform_device *device)
-{
-	DBG("");
-	return 0;
-}
-
-static void pdev_shutdown(struct platform_device *device)
-{
-	DBG("");
-}
 
 static int pdev_probe(struct platform_device *device)
 {
@@ -709,24 +986,79 @@ static int pdev_remove(struct platform_device *device)
 	return 0;
 }
 
-#ifdef CONFIG_PM
-static const struct dev_pm_ops omapdrm_pm_ops = {
-	.resume = omap_gem_resume,
-};
+#ifdef CONFIG_PM_SLEEP
+static int omap_drm_suspend_all_displays(void)
+{
+	struct omap_dss_device *dssdev = NULL;
+
+	for_each_dss_dev(dssdev) {
+		if (!dssdev->driver)
+			continue;
+
+		if (dssdev->state == OMAP_DSS_DISPLAY_ACTIVE) {
+			dssdev->driver->disable(dssdev);
+			dssdev->activate_after_resume = true;
+		} else {
+			dssdev->activate_after_resume = false;
+		}
+	}
+
+	return 0;
+}
+
+static int omap_drm_resume_all_displays(void)
+{
+	struct omap_dss_device *dssdev = NULL;
+
+	for_each_dss_dev(dssdev) {
+		if (!dssdev->driver)
+			continue;
+
+		if (dssdev->activate_after_resume) {
+			dssdev->driver->enable(dssdev);
+			dssdev->activate_after_resume = false;
+		}
+	}
+
+	return 0;
+}
+
+static int omap_drm_suspend(struct device *dev)
+{
+	struct drm_device *drm_dev = dev_get_drvdata(dev);
+
+	drm_kms_helper_poll_disable(drm_dev);
+
+	drm_modeset_lock_all(drm_dev);
+	omap_drm_suspend_all_displays();
+	drm_modeset_unlock_all(drm_dev);
+
+	return 0;
+}
+
+static int omap_drm_resume(struct device *dev)
+{
+	struct drm_device *drm_dev = dev_get_drvdata(dev);
+
+	drm_modeset_lock_all(drm_dev);
+	omap_drm_resume_all_displays();
+	drm_modeset_unlock_all(drm_dev);
+
+	drm_kms_helper_poll_enable(drm_dev);
+
+	return omap_gem_resume(dev);
+}
 #endif
 
+static SIMPLE_DEV_PM_OPS(omapdrm_pm_ops, omap_drm_suspend, omap_drm_resume);
+
 static struct platform_driver pdev = {
-		.driver = {
-			.name = DRIVER_NAME,
-#ifdef CONFIG_PM
-			.pm = &omapdrm_pm_ops,
-#endif
-		},
-		.probe = pdev_probe,
-		.remove = pdev_remove,
-		.suspend = pdev_suspend,
-		.resume = pdev_resume,
-		.shutdown = pdev_shutdown,
+	.driver = {
+		.name = DRIVER_NAME,
+		.pm = &omapdrm_pm_ops,
+	},
+	.probe = pdev_probe,
+	.remove = pdev_remove,
 };
 
 static int __init omap_drm_init(void)

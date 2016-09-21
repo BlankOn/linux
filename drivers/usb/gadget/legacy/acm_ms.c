@@ -121,7 +121,7 @@ static struct usb_function *f_msg;
 /*
  * We _always_ have both ACM and mass storage functions.
  */
-static int __init acm_ms_do_config(struct usb_configuration *c)
+static int acm_ms_do_config(struct usb_configuration *c)
 {
 	struct fsg_opts *opts;
 	int	status;
@@ -147,10 +147,6 @@ static int __init acm_ms_do_config(struct usb_configuration *c)
 	if (status < 0)
 		goto put_msg;
 
-	status = fsg_common_run_thread(opts->common);
-	if (status)
-		goto remove_acm;
-
 	status = usb_add_function(c, f_msg);
 	if (status)
 		goto remove_acm;
@@ -174,7 +170,7 @@ static struct usb_configuration acm_ms_config_driver = {
 
 /*-------------------------------------------------------------------------*/
 
-static int __init acm_ms_bind(struct usb_composite_dev *cdev)
+static int acm_ms_bind(struct usb_composite_dev *cdev)
 {
 	struct usb_gadget	*gadget = cdev->gadget;
 	struct fsg_opts		*opts;
@@ -199,10 +195,6 @@ static int __init acm_ms_bind(struct usb_composite_dev *cdev)
 	status = fsg_common_set_num_buffers(opts->common, fsg_num_buffers);
 	if (status)
 		goto fail;
-
-	status = fsg_common_set_nluns(opts->common, config.nluns);
-	if (status)
-		goto fail_set_nluns;
 
 	status = fsg_common_set_cdev(opts->common, cdev, config.can_stall);
 	if (status)
@@ -239,8 +231,6 @@ static int __init acm_ms_bind(struct usb_composite_dev *cdev)
 fail_string_ids:
 	fsg_common_remove_luns(opts->common);
 fail_set_cdev:
-	fsg_common_free_luns(opts->common);
-fail_set_nluns:
 	fsg_common_free_buffers(opts->common);
 fail:
 	usb_put_function_instance(fi_msg);
@@ -249,7 +239,7 @@ fail_get_msg:
 	return status;
 }
 
-static int __exit acm_ms_unbind(struct usb_composite_dev *cdev)
+static int acm_ms_unbind(struct usb_composite_dev *cdev)
 {
 	usb_put_function(f_msg);
 	usb_put_function_instance(fi_msg);
@@ -258,13 +248,13 @@ static int __exit acm_ms_unbind(struct usb_composite_dev *cdev)
 	return 0;
 }
 
-static __refdata struct usb_composite_driver acm_ms_driver = {
+static struct usb_composite_driver acm_ms_driver = {
 	.name		= "g_acm_ms",
 	.dev		= &device_desc,
 	.max_speed	= USB_SPEED_SUPER,
 	.strings	= dev_strings,
 	.bind		= acm_ms_bind,
-	.unbind		= __exit_p(acm_ms_unbind),
+	.unbind		= acm_ms_unbind,
 };
 
 module_usb_composite_driver(acm_ms_driver);

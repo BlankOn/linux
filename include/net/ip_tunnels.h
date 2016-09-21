@@ -142,6 +142,7 @@ int ip_tunnel_init(struct net_device *dev);
 void ip_tunnel_uninit(struct net_device *dev);
 void  ip_tunnel_dellink(struct net_device *dev, struct list_head *head);
 struct net *ip_tunnel_get_link_net(const struct net_device *dev);
+int ip_tunnel_get_iflink(const struct net_device *dev);
 int ip_tunnel_init_net(struct net *net, int ip_tnl_net_id,
 		       struct rtnl_link_ops *ops, char *devname);
 
@@ -206,12 +207,13 @@ static inline void iptunnel_xmit_stats(int err,
 				       struct pcpu_sw_netstats __percpu *stats)
 {
 	if (err > 0) {
-		struct pcpu_sw_netstats *tstats = this_cpu_ptr(stats);
+		struct pcpu_sw_netstats *tstats = get_cpu_ptr(stats);
 
 		u64_stats_update_begin(&tstats->syncp);
 		tstats->tx_bytes += err;
 		tstats->tx_packets++;
 		u64_stats_update_end(&tstats->syncp);
+		put_cpu_ptr(tstats);
 	} else if (err < 0) {
 		err_stats->tx_errors++;
 		err_stats->tx_aborted_errors++;

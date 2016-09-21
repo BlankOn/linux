@@ -93,8 +93,15 @@ int restore_sigcontext(struct pt_regs *regs, struct sigcontext __user *sc)
 		COPY(r15);
 #endif /* CONFIG_X86_64 */
 
+#ifdef CONFIG_X86_32
 		COPY_SEG_CPL3(cs);
 		COPY_SEG_CPL3(ss);
+#else /* !CONFIG_X86_32 */
+		/* Kernel saves and restores only the CS segment register on signals,
+		 * which is the bare minimum needed to allow mixed 32/64-bit code.
+		 * App's signal handler can save/restore other segments if needed. */
+		COPY_SEG_CPL3(cs);
+#endif /* CONFIG_X86_32 */
 
 		get_user_ex(tmpflags, &sc->flags);
 		regs->flags = (regs->flags & ~FIX_EFLAGS) | (tmpflags & FIX_EFLAGS);
@@ -154,9 +161,8 @@ int setup_sigcontext(struct sigcontext __user *sc, void __user *fpstate,
 #else /* !CONFIG_X86_32 */
 		put_user_ex(regs->flags, &sc->flags);
 		put_user_ex(regs->cs, &sc->cs);
-		put_user_ex(0, &sc->__pad2);
-		put_user_ex(0, &sc->__pad1);
-		put_user_ex(regs->ss, &sc->ss);
+		put_user_ex(0, &sc->gs);
+		put_user_ex(0, &sc->fs);
 #endif /* CONFIG_X86_32 */
 
 		put_user_ex(fpstate, &sc->fpstate);
@@ -450,19 +456,9 @@ static int __setup_rt_frame(int sig, struct ksignal *ksig,
 
 	regs->sp = (unsigned long)frame;
 
-	/*
-	 * Set up the CS and SS registers to run signal handlers in
-	 * 64-bit mode, even if the handler happens to be interrupting
-	 * 32-bit or 16-bit code.
-	 *
-	 * SS is subtle.  In 64-bit mode, we don't need any particular
-	 * SS descriptor, but we do need SS to be valid.  It's possible
-	 * that the old SS is entirely bogus -- this can happen if the
-	 * signal we're trying to deliver is #GP or #SS caused by a bad
-	 * SS value.
-	 */
+	/* Set up the CS register to run signal handlers in 64-bit mode,
+	   even if the handler happens to be interrupting 32-bit code. */
 	regs->cs = __USER_CS;
-	regs->ss = __USER_DS;
 
 	return 0;
 }
@@ -593,24 +589,10 @@ badframe:
 	return 0;
 }
 
-/*
- * OK, we're invoking a handler:
- */
-static int signr_convert(int sig)
-{
-#ifdef CONFIG_X86_32
-	struct thread_info *info = current_thread_info();
-
-	if (info->exec_domain && info->exec_domain->signal_invmap && sig < 32)
-		return info->exec_domain->signal_invmap[sig];
-#endif /* CONFIG_X86_32 */
-	return sig;
-}
-
 static int
 setup_rt_frame(struct ksignal *ksig, struct pt_regs *regs)
 {
-	int usig = signr_convert(ksig->sig);
+	int usig = ksig->sig;
 	sigset_t *set = sigmask_to_save();
 	compat_sigset_t *cset = (compat_sigset_t *) set;
 
@@ -630,7 +612,8 @@ setup_rt_frame(struct ksignal *ksig, struct pt_regs *regs)
 static void
 handle_signal(struct ksignal *ksig, struct pt_regs *regs)
 {
-	bool failed;
+	bool stepping, failed;
+
 	/* Are we from a system call? */
 	if (syscall_get_nr(current, regs) >= 0) {
 		/* If so, check system call restarting.. */
@@ -654,12 +637,13 @@ handle_signal(struct ksignal *ksig, struct pt_regs *regs)
 	}
 
 	/*
-	 * If TF is set due to a debugger (TIF_FORCED_TF), clear the TF
-	 * flag so that register information in the sigcontext is correct.
+	 * If TF is set due to a debugger (TIF_FORCED_TF), clear TF now
+	 * so that register information in the sigcontext is correct and
+	 * then notify the tracer before entering the signal handler.
 	 */
-	if (unlikely(regs->flags & X86_EFLAGS_TF) &&
-	    likely(test_and_clear_thread_flag(TIF_FORCED_TF)))
-		regs->flags &= ~X86_EFLAGS_TF;
+	stepping = test_thread_flag(TIF_SINGLESTEP);
+	if (stepping)
+		user_disable_single_step(current);
 
 	failed = (setup_rt_frame(ksig, regs) < 0);
 	if (!failed) {
@@ -670,10 +654,8 @@ handle_signal(struct ksignal *ksig, struct pt_regs *regs)
 		 * it might disable possible debug exception from the
 		 * signal handler.
 		 *
-		 * Clear TF when entering the signal handler, but
-		 * notify any tracer that was single-stepping it.
-		 * The tracer may want to single-step inside the
-		 * handler too.
+		 * Clear TF for the case when it wasn't set by debugger to
+		 * avoid the recursive send_sigtrap() in SIGTRAP handler.
 		 */
 		regs->flags &= ~(X86_EFLAGS_DF|X86_EFLAGS_RF|X86_EFLAGS_TF);
 		/*
@@ -682,15 +664,18 @@ handle_signal(struct ksignal *ksig, struct pt_regs *regs)
 		if (used_math())
 			fpu_reset_state(current);
 	}
-	signal_setup_done(failed, ksig, test_thread_flag(TIF_SINGLESTEP));
+	signal_setup_done(failed, ksig, stepping);
 }
 
-#ifdef CONFIG_X86_32
-#define NR_restart_syscall	__NR_restart_syscall
-#else /* !CONFIG_X86_32 */
-#define NR_restart_syscall	\
-	test_thread_flag(TIF_IA32) ? __NR_ia32_restart_syscall : __NR_restart_syscall
-#endif /* CONFIG_X86_32 */
+static inline unsigned long get_nr_restart_syscall(const struct pt_regs *regs)
+{
+#if defined(CONFIG_X86_32) || !defined(CONFIG_X86_64)
+	return __NR_restart_syscall;
+#else /* !CONFIG_X86_32 && CONFIG_X86_64 */
+	return test_thread_flag(TIF_IA32) ? __NR_ia32_restart_syscall :
+		__NR_restart_syscall | (regs->orig_ax & __X32_SYSCALL_BIT);
+#endif /* CONFIG_X86_32 || !CONFIG_X86_64 */
+}
 
 /*
  * Note that 'init' is a special process: it doesn't get signals it doesn't
@@ -719,7 +704,7 @@ static void do_signal(struct pt_regs *regs)
 			break;
 
 		case -ERESTART_RESTARTBLOCK:
-			regs->ax = NR_restart_syscall;
+			regs->ax = get_nr_restart_syscall(regs);
 			regs->ip -= 2;
 			break;
 		}
@@ -740,6 +725,14 @@ __visible void
 do_notify_resume(struct pt_regs *regs, void *unused, __u32 thread_info_flags)
 {
 	user_exit();
+
+#ifdef ARCH_RT_DELAYS_SIGNAL_SEND
+	if (unlikely(current->forced_info.si_signo)) {
+		struct task_struct *t = current;
+		force_sig_info(t->forced_info.si_signo, &t->forced_info, t);
+		t->forced_info.si_signo = 0;
+	}
+#endif
 
 	if (thread_info_flags & _TIF_UPROBE)
 		uprobe_notify_resume(regs);

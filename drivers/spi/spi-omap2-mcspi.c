@@ -944,6 +944,7 @@ static int omap2_mcspi_request_dma(struct spi_device *spi)
 	struct omap2_mcspi_dma	*mcspi_dma;
 	dma_cap_mask_t mask;
 	unsigned sig;
+	int ret = 0;
 
 	mcspi = spi_master_get_devdata(master);
 	mcspi_dma = mcspi->dma_channels + spi->chip_select;
@@ -955,30 +956,35 @@ static int omap2_mcspi_request_dma(struct spi_device *spi)
 	dma_cap_set(DMA_SLAVE, mask);
 	sig = mcspi_dma->dma_rx_sync_dev;
 
-	mcspi_dma->dma_rx =
-		dma_request_slave_channel_compat(mask, omap_dma_filter_fn,
-						 &sig, &master->dev,
-						 mcspi_dma->dma_rx_ch_name);
-	if (!mcspi_dma->dma_rx)
-		goto no_dma;
-
-	sig = mcspi_dma->dma_tx_sync_dev;
-	mcspi_dma->dma_tx =
-		dma_request_slave_channel_compat(mask, omap_dma_filter_fn,
-						 &sig, &master->dev,
-						 mcspi_dma->dma_tx_ch_name);
-
-	if (!mcspi_dma->dma_tx) {
-		dma_release_channel(mcspi_dma->dma_rx);
+	mcspi_dma->dma_rx = dma_request_slave_channel_compat_reason(mask,
+					omap_dma_filter_fn, &sig, &master->dev,
+					mcspi_dma->dma_rx_ch_name);
+	if (IS_ERR(mcspi_dma->dma_rx)) {
+		ret = PTR_ERR(mcspi_dma->dma_rx);
 		mcspi_dma->dma_rx = NULL;
+		if (ret != -EPROBE_DEFER)
+			ret = -EAGAIN;
 		goto no_dma;
 	}
 
-	return 0;
+	sig = mcspi_dma->dma_tx_sync_dev;
+	mcspi_dma->dma_tx = dma_request_slave_channel_compat_reason(mask,
+					omap_dma_filter_fn, &sig, &master->dev,
+					mcspi_dma->dma_tx_ch_name);
+
+	if (IS_ERR(mcspi_dma->dma_tx)) {
+		ret = PTR_ERR(mcspi_dma->dma_tx);
+		mcspi_dma->dma_tx = NULL;
+		dma_release_channel(mcspi_dma->dma_rx);
+		mcspi_dma->dma_rx = NULL;
+		if (ret != -EPROBE_DEFER)
+			ret = -EAGAIN;
+	}
 
 no_dma:
-	dev_warn(&spi->dev, "not using DMA for McSPI\n");
-	return -EAGAIN;
+	if (ret && ret != -EPROBE_DEFER)
+		dev_warn(&spi->dev, "not using DMA for McSPI\n");
+	return ret;
 }
 
 static int omap2_mcspi_setup(struct spi_device *spi)
@@ -1210,6 +1216,7 @@ static int omap2_mcspi_transfer_one_message(struct spi_master *master,
 	struct omap2_mcspi	*mcspi;
 	struct omap2_mcspi_dma	*mcspi_dma;
 	struct spi_transfer	*t;
+	int status;
 
 	spi = m->spi;
 	mcspi = spi_master_get_devdata(master);
@@ -1229,7 +1236,8 @@ static int omap2_mcspi_transfer_one_message(struct spi_master *master,
 					tx_buf ? "tx" : "",
 					rx_buf ? "rx" : "",
 					t->bits_per_word);
-			return -EINVAL;
+			status = -EINVAL;
+			goto out;
 		}
 
 		if (m->is_dma_mapped || len < DMA_MIN_BYTES)
@@ -1241,7 +1249,8 @@ static int omap2_mcspi_transfer_one_message(struct spi_master *master,
 			if (dma_mapping_error(mcspi->dev, t->tx_dma)) {
 				dev_dbg(mcspi->dev, "dma %cX %d bytes error\n",
 						'T', len);
-				return -EINVAL;
+				status = -EINVAL;
+				goto out;
 			}
 		}
 		if (mcspi_dma->dma_rx && rx_buf != NULL) {
@@ -1253,14 +1262,19 @@ static int omap2_mcspi_transfer_one_message(struct spi_master *master,
 				if (tx_buf != NULL)
 					dma_unmap_single(mcspi->dev, t->tx_dma,
 							len, DMA_TO_DEVICE);
-				return -EINVAL;
+				status = -EINVAL;
+				goto out;
 			}
 		}
 	}
 
 	omap2_mcspi_work(mcspi, m);
+	/* spi_finalize_current_message() changes the status inside the
+	 * spi_message, save the status here. */
+	status = m->status;
+out:
 	spi_finalize_current_message(master);
-	return 0;
+	return status;
 }
 
 static int omap2_mcspi_master_setup(struct omap2_mcspi *mcspi)
@@ -1475,6 +1489,13 @@ static int omap2_mcspi_remove(struct platform_device *pdev)
 MODULE_ALIAS("platform:omap2_mcspi");
 
 #ifdef	CONFIG_SUSPEND
+static int omap2_mcspi_suspend(struct device *dev)
+{
+	pinctrl_pm_select_sleep_state(dev);
+
+	return 0;
+}
+
 /*
  * When SPI wake up from off-mode, CS is in activate state. If it was in
  * unactive state when driver was suspend, then force it to unactive state at
@@ -1486,6 +1507,8 @@ static int omap2_mcspi_resume(struct device *dev)
 	struct omap2_mcspi	*mcspi = spi_master_get_devdata(master);
 	struct omap2_mcspi_regs	*ctx = &mcspi->ctx;
 	struct omap2_mcspi_cs	*cs;
+
+	pinctrl_pm_select_default_state(dev);
 
 	pm_runtime_get_sync(mcspi->dev);
 	list_for_each_entry(cs, &ctx->cs, node) {
@@ -1504,12 +1527,10 @@ static int omap2_mcspi_resume(struct device *dev)
 	pm_runtime_put_autosuspend(mcspi->dev);
 	return 0;
 }
-#else
-#define	omap2_mcspi_resume	NULL
-#endif
+#endif /* CONFIG_SUSPEND */
 
 static const struct dev_pm_ops omap2_mcspi_pm_ops = {
-	.resume = omap2_mcspi_resume,
+	SET_SYSTEM_SLEEP_PM_OPS(omap2_mcspi_suspend, omap2_mcspi_resume)
 	.runtime_resume	= omap_mcspi_runtime_resume,
 };
 

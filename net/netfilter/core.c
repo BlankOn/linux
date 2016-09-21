@@ -22,10 +22,16 @@
 #include <linux/proc_fs.h>
 #include <linux/mutex.h>
 #include <linux/slab.h>
+#include <linux/locallock.h>
 #include <net/net_namespace.h>
 #include <net/sock.h>
 
 #include "nf_internals.h"
+
+#ifdef CONFIG_PREEMPT_RT_BASE
+DEFINE_LOCAL_IRQ_LOCK(xt_write_lock);
+EXPORT_PER_CPU_SYMBOL(xt_write_lock);
+#endif
 
 static DEFINE_MUTEX(afinfo_mutex);
 
@@ -89,6 +95,7 @@ void nf_unregister_hook(struct nf_hook_ops *reg)
 	static_key_slow_dec(&nf_hooks_needed[reg->pf][reg->hooknum]);
 #endif
 	synchronize_net();
+	nf_queue_nf_hook_drop(reg);
 }
 EXPORT_SYMBOL(nf_unregister_hook);
 
@@ -120,12 +127,8 @@ EXPORT_SYMBOL(nf_unregister_hooks);
 
 unsigned int nf_iterate(struct list_head *head,
 			struct sk_buff *skb,
-			unsigned int hook,
-			const struct net_device *indev,
-			const struct net_device *outdev,
-			struct nf_hook_ops **elemp,
-			int (*okfn)(struct sk_buff *),
-			int hook_thresh)
+			struct nf_hook_state *state,
+			struct nf_hook_ops **elemp)
 {
 	unsigned int verdict;
 
@@ -134,19 +137,19 @@ unsigned int nf_iterate(struct list_head *head,
 	 * function because of risk of continuing from deleted element.
 	 */
 	list_for_each_entry_continue_rcu((*elemp), head, list) {
-		if (hook_thresh > (*elemp)->priority)
+		if (state->thresh > (*elemp)->priority)
 			continue;
 
 		/* Optimization: we don't need to hold module
 		   reference here, since function can't sleep. --RR */
 repeat:
-		verdict = (*elemp)->hook(*elemp, skb, indev, outdev, okfn);
+		verdict = (*elemp)->hook(*elemp, skb, state);
 		if (verdict != NF_ACCEPT) {
 #ifdef CONFIG_NETFILTER_DEBUG
 			if (unlikely((verdict & NF_VERDICT_MASK)
 							> NF_MAX_VERDICT)) {
 				NFDEBUG("Evil return from %p(%u).\n",
-					(*elemp)->hook, hook);
+					(*elemp)->hook, state->hook);
 				continue;
 			}
 #endif
@@ -161,11 +164,7 @@ repeat:
 
 /* Returns 1 if okfn() needs to be executed by the caller,
  * -EPERM for NF_DROP, 0 otherwise. */
-int nf_hook_slow(u_int8_t pf, unsigned int hook, struct sk_buff *skb,
-		 struct net_device *indev,
-		 struct net_device *outdev,
-		 int (*okfn)(struct sk_buff *),
-		 int hook_thresh)
+int nf_hook_slow(struct sk_buff *skb, struct nf_hook_state *state)
 {
 	struct nf_hook_ops *elem;
 	unsigned int verdict;
@@ -174,10 +173,11 @@ int nf_hook_slow(u_int8_t pf, unsigned int hook, struct sk_buff *skb,
 	/* We may already have this, but read-locks nest anyway */
 	rcu_read_lock();
 
-	elem = list_entry_rcu(&nf_hooks[pf][hook], struct nf_hook_ops, list);
+	elem = list_entry_rcu(&nf_hooks[state->pf][state->hook],
+			      struct nf_hook_ops, list);
 next_hook:
-	verdict = nf_iterate(&nf_hooks[pf][hook], skb, hook, indev,
-			     outdev, &elem, okfn, hook_thresh);
+	verdict = nf_iterate(&nf_hooks[state->pf][state->hook], skb, state,
+			     &elem);
 	if (verdict == NF_ACCEPT || verdict == NF_STOP) {
 		ret = 1;
 	} else if ((verdict & NF_VERDICT_MASK) == NF_DROP) {
@@ -186,8 +186,8 @@ next_hook:
 		if (ret == 0)
 			ret = -EPERM;
 	} else if ((verdict & NF_VERDICT_MASK) == NF_QUEUE) {
-		int err = nf_queue(skb, elem, pf, hook, indev, outdev, okfn,
-						verdict >> NF_VERDICT_QBITS);
+		int err = nf_queue(skb, elem, state,
+				   verdict >> NF_VERDICT_QBITS);
 		if (err < 0) {
 			if (err == -ECANCELED)
 				goto next_hook;

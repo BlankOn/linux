@@ -37,7 +37,6 @@
 
 #define TTY_BUFFER_PAGE	(((PAGE_SIZE - sizeof(struct tty_buffer)) / 2) & ~0xFF)
 
-
 /**
  *	tty_buffer_lock_exclusive	-	gain exclusive access to buffer
  *	tty_buffer_unlock_exclusive	-	release exclusive access
@@ -489,19 +488,6 @@ static void flush_to_ldisc(struct work_struct *work)
 }
 
 /**
- *	tty_flush_to_ldisc
- *	@tty: tty to push
- *
- *	Push the terminal flip buffers to the line discipline.
- *
- *	Must not be called from IRQ context.
- */
-void tty_flush_to_ldisc(struct tty_struct *tty)
-{
-	flush_work(&tty->port->buf.work);
-}
-
-/**
  *	tty_flip_buffer_push	-	terminal
  *	@port: tty port to push
  *
@@ -562,4 +548,9 @@ EXPORT_SYMBOL_GPL(tty_buffer_set_limit);
 void tty_buffer_set_lock_subclass(struct tty_port *port)
 {
 	lockdep_set_subclass(&port->buf.lock, TTY_LOCK_SLAVE);
+}
+
+void tty_buffer_flush_work(struct tty_port *port)
+{
+	flush_work(&port->buf.work);
 }

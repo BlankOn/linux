@@ -709,6 +709,9 @@ static int iucv_sock_bind(struct socket *sock, struct sockaddr *addr,
 	if (!addr || addr->sa_family != AF_IUCV)
 		return -EINVAL;
 
+	if (addr_len < sizeof(struct sockaddr_iucv))
+		return -EINVAL;
+
 	lock_sock(sk);
 	if (sk->sk_state != IUCV_OPEN) {
 		err = -EBADFD;
@@ -1026,8 +1029,8 @@ static int iucv_send_iprm(struct iucv_path *path, struct iucv_message *msg,
 				 (void *) prmdata, 8);
 }
 
-static int iucv_sock_sendmsg(struct kiocb *iocb, struct socket *sock,
-			     struct msghdr *msg, size_t len)
+static int iucv_sock_sendmsg(struct socket *sock, struct msghdr *msg,
+			     size_t len)
 {
 	struct sock *sk = sock->sk;
 	struct iucv_sock *iucv = iucv_sk(sk);
@@ -1315,8 +1318,8 @@ static void iucv_process_message_q(struct sock *sk)
 	}
 }
 
-static int iucv_sock_recvmsg(struct kiocb *iocb, struct socket *sock,
-			     struct msghdr *msg, size_t len, int flags)
+static int iucv_sock_recvmsg(struct socket *sock, struct msghdr *msg,
+			     size_t len, int flags)
 {
 	int noblock = flags & MSG_DONTWAIT;
 	struct sock *sk = sock->sk;
