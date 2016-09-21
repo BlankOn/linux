@@ -132,7 +132,7 @@ static inline struct musb *dev_to_musb(struct device *dev)
 /*-------------------------------------------------------------------------*/
 
 #ifndef CONFIG_BLACKFIN
-static int musb_ulpi_read(struct usb_phy *phy, u32 offset)
+static int musb_ulpi_read(struct usb_phy *phy, u32 reg)
 {
 	void __iomem *addr = phy->io_priv;
 	int	i = 0;
@@ -151,7 +151,7 @@ static int musb_ulpi_read(struct usb_phy *phy, u32 offset)
 	 * ULPICarKitControlDisableUTMI after clearing POWER_SUSPENDM.
 	 */
 
-	musb_writeb(addr, MUSB_ULPI_REG_ADDR, (u8)offset);
+	musb_writeb(addr, MUSB_ULPI_REG_ADDR, (u8)reg);
 	musb_writeb(addr, MUSB_ULPI_REG_CONTROL,
 			MUSB_ULPI_REG_REQ | MUSB_ULPI_RDN_WR);
 
@@ -176,7 +176,7 @@ out:
 	return ret;
 }
 
-static int musb_ulpi_write(struct usb_phy *phy, u32 offset, u32 data)
+static int musb_ulpi_write(struct usb_phy *phy, u32 val, u32 reg)
 {
 	void __iomem *addr = phy->io_priv;
 	int	i = 0;
@@ -191,8 +191,8 @@ static int musb_ulpi_write(struct usb_phy *phy, u32 offset, u32 data)
 	power &= ~MUSB_POWER_SUSPENDM;
 	musb_writeb(addr, MUSB_POWER, power);
 
-	musb_writeb(addr, MUSB_ULPI_REG_ADDR, (u8)offset);
-	musb_writeb(addr, MUSB_ULPI_REG_DATA, (u8)data);
+	musb_writeb(addr, MUSB_ULPI_REG_ADDR, (u8)reg);
+	musb_writeb(addr, MUSB_ULPI_REG_DATA, (u8)val);
 	musb_writeb(addr, MUSB_ULPI_REG_CONTROL, MUSB_ULPI_REG_REQ);
 
 	while (!(musb_readb(addr, MUSB_ULPI_REG_CONTROL)
@@ -1037,6 +1037,7 @@ void musb_start(struct musb *musb)
 	 * (c) peripheral initiates, using SRP
 	 */
 	if (musb->port_mode != MUSB_PORT_MODE_HOST &&
+			musb->xceiv->otg->state != OTG_STATE_A_WAIT_BCON &&
 			(devctl & MUSB_DEVCTL_VBUS) == MUSB_DEVCTL_VBUS) {
 		musb->is_active = 1;
 	} else {
@@ -2021,13 +2022,7 @@ musb_init_controller(struct device *dev, int nIrq, void __iomem *ctrl)
 	if (musb->ops->quirks)
 		musb->io.quirks = musb->ops->quirks;
 
-	/* At least tusb6010 has it's own offsets.. */
-	if (musb->ops->ep_offset)
-		musb->io.ep_offset = musb->ops->ep_offset;
-	if (musb->ops->ep_select)
-		musb->io.ep_select = musb->ops->ep_select;
-
-	/* ..and some devices use indexed offset or flat offset */
+	/* Most devices use indexed offset or flat offset */
 	if (musb->io.quirks & MUSB_INDEXED_EP) {
 		musb->io.ep_offset = musb_indexed_ep_offset;
 		musb->io.ep_select = musb_indexed_ep_select;
@@ -2035,6 +2030,12 @@ musb_init_controller(struct device *dev, int nIrq, void __iomem *ctrl)
 		musb->io.ep_offset = musb_flat_ep_offset;
 		musb->io.ep_select = musb_flat_ep_select;
 	}
+
+	/* At least tusb6010 has its own offsets */
+	if (musb->ops->ep_offset)
+		musb->io.ep_offset = musb->ops->ep_offset;
+	if (musb->ops->ep_select)
+		musb->io.ep_select = musb->ops->ep_select;
 
 	if (musb->ops->fifo_mode)
 		fifo_mode = musb->ops->fifo_mode;

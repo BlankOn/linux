@@ -129,8 +129,11 @@ struct tpm_chip *tpmm_chip_alloc(struct device *dev,
 
 	device_initialize(&chip->dev);
 
-	chip->cdev.owner = chip->pdev->driver->owner;
 	cdev_init(&chip->cdev, &tpm_fops);
+	chip->cdev.owner = chip->pdev->driver->owner;
+	chip->cdev.kobj.parent = &chip->dev.kobj;
+
+	devm_add_action(dev, (void (*)(void *)) put_device, &chip->dev);
 
 	return chip;
 }
@@ -167,7 +170,42 @@ static int tpm_dev_add_device(struct tpm_chip *chip)
 static void tpm_dev_del_device(struct tpm_chip *chip)
 {
 	cdev_del(&chip->cdev);
-	device_unregister(&chip->dev);
+	device_del(&chip->dev);
+}
+
+static int tpm1_chip_register(struct tpm_chip *chip)
+{
+	int rc;
+
+	if (chip->flags & TPM_CHIP_FLAG_TPM2)
+		return 0;
+
+	rc = tpm_sysfs_add_device(chip);
+	if (rc)
+		return rc;
+
+	rc = tpm_add_ppi(chip);
+	if (rc) {
+		tpm_sysfs_del_device(chip);
+		return rc;
+	}
+
+	chip->bios_dir = tpm_bios_log_setup(chip->devname);
+
+	return 0;
+}
+
+static void tpm1_chip_unregister(struct tpm_chip *chip)
+{
+	if (chip->flags & TPM_CHIP_FLAG_TPM2)
+		return;
+
+	if (chip->bios_dir)
+		tpm_bios_log_teardown(chip->bios_dir);
+
+	tpm_remove_ppi(chip);
+
+	tpm_sysfs_del_device(chip);
 }
 
 /*
@@ -185,22 +223,13 @@ int tpm_chip_register(struct tpm_chip *chip)
 {
 	int rc;
 
-	/* Populate sysfs for TPM1 devices. */
-	if (!(chip->flags & TPM_CHIP_FLAG_TPM2)) {
-		rc = tpm_sysfs_add_device(chip);
-		if (rc)
-			goto del_misc;
-
-		rc = tpm_add_ppi(chip);
-		if (rc)
-			goto del_sysfs;
-
-		chip->bios_dir = tpm_bios_log_setup(chip->devname);
-	}
+	rc = tpm1_chip_register(chip);
+	if (rc)
+		return rc;
 
 	rc = tpm_dev_add_device(chip);
 	if (rc)
-		return rc;
+		goto out_err;
 
 	/* Make the chip available. */
 	spin_lock(&driver_lock);
@@ -210,10 +239,8 @@ int tpm_chip_register(struct tpm_chip *chip)
 	chip->flags |= TPM_CHIP_FLAG_REGISTERED;
 
 	return 0;
-del_sysfs:
-	tpm_sysfs_del_device(chip);
-del_misc:
-	tpm_dev_del_device(chip);
+out_err:
+	tpm1_chip_unregister(chip);
 	return rc;
 }
 EXPORT_SYMBOL_GPL(tpm_chip_register);
@@ -238,13 +265,7 @@ void tpm_chip_unregister(struct tpm_chip *chip)
 	spin_unlock(&driver_lock);
 	synchronize_rcu();
 
-	if (!(chip->flags & TPM_CHIP_FLAG_TPM2)) {
-		if (chip->bios_dir)
-			tpm_bios_log_teardown(chip->bios_dir);
-		tpm_remove_ppi(chip);
-		tpm_sysfs_del_device(chip);
-	}
-
+	tpm1_chip_unregister(chip);
 	tpm_dev_del_device(chip);
 }
 EXPORT_SYMBOL_GPL(tpm_chip_unregister);

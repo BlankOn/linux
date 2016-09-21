@@ -99,10 +99,40 @@ static int ti_clk_mux_set_parent(struct clk_hw *hw, u8 index)
 	return 0;
 }
 
+/**
+ * clk_mux_save_context - Save the parent selcted in the mux
+ * @hw: pointer  struct clk_hw
+ *
+ * Save the parent mux value.
+ */
+static int clk_mux_save_context(struct clk_hw *hw)
+{
+	struct clk_mux *mux = to_clk_mux(hw);
+
+	mux->saved_parent = ti_clk_mux_get_parent(hw);
+	return 0;
+}
+
+/**
+ * clk_mux_restore_context - Restore the parent in the mux
+ * @hw: pointer  struct clk_hw
+ *
+ * Restore the saved parent mux value.
+ */
+static void clk_mux_restore_context(struct clk_hw *hw)
+{
+	struct clk_mux *mux = to_clk_mux(hw);
+
+	ti_clk_mux_set_parent(hw, mux->saved_parent);
+}
+
 const struct clk_ops ti_clk_mux_ops = {
 	.get_parent = ti_clk_mux_get_parent,
 	.set_parent = ti_clk_mux_set_parent,
 	.determine_rate = __clk_mux_determine_rate,
+	.save_context = clk_mux_save_context,
+	.restore_context = clk_mux_restore_context,
+
 };
 
 static struct clk *_register_mux(struct device *dev, const char *name,
@@ -210,7 +240,7 @@ static void of_mux_clk_setup(struct device_node *node)
 
 	reg = ti_clk_get_reg_addr(node, 0);
 
-	if (!reg)
+	if (IS_ERR(reg))
 		goto cleanup;
 
 	of_property_read_u32(node, "ti,bit-shift", &shift);
@@ -283,7 +313,7 @@ static void __init of_ti_composite_mux_clk_setup(struct device_node *node)
 
 	mux->reg = ti_clk_get_reg_addr(node, 0);
 
-	if (!mux->reg)
+	if (IS_ERR(mux->reg))
 		goto cleanup;
 
 	if (!of_property_read_u32(node, "ti,bit-shift", &val))

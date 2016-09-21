@@ -17,10 +17,18 @@
  * this program.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <drm/drm_atomic_helper.h>
+#include <drm/drm_crtc.h>
+#include <drm/drm_crtc_helper.h>
+
 #include "omap_drv.h"
 
-#include "drm_crtc.h"
-#include "drm_crtc_helper.h"
+#define OMAP_DRM_MODE_FLAG_DATA_RISING	(1 << 24)
+#define OMAP_DRM_MODE_FLAG_DATA_FALLING	(1 << 25)
+#define OMAP_DRM_MODE_FLAG_SYNC_RISING	(1 << 26)
+#define OMAP_DRM_MODE_FLAG_SYNC_FALLING	(1 << 27)
+#define OMAP_DRM_MODE_FLAG_PDE		(1 << 28)
+#define OMAP_DRM_MODE_FLAG_NDE		(1 << 29)
 
 /*
  * connector funcs
@@ -62,6 +70,9 @@ void copy_timings_omap_to_drm(struct drm_display_mode *mode,
 	if (timings->interlace)
 		mode->flags |= DRM_MODE_FLAG_INTERLACE;
 
+	if (timings->double_pixel)
+		mode->flags |= DRM_MODE_FLAG_DBLCLK;
+
 	if (timings->hsync_level == OMAPDSS_SIG_ACTIVE_HIGH)
 		mode->flags |= DRM_MODE_FLAG_PHSYNC;
 	else
@@ -71,6 +82,21 @@ void copy_timings_omap_to_drm(struct drm_display_mode *mode,
 		mode->flags |= DRM_MODE_FLAG_PVSYNC;
 	else
 		mode->flags |= DRM_MODE_FLAG_NVSYNC;
+
+	if (timings->data_pclk_edge == OMAPDSS_DRIVE_SIG_RISING_EDGE)
+		mode->flags |= OMAP_DRM_MODE_FLAG_DATA_RISING;
+	else
+		mode->flags |= OMAP_DRM_MODE_FLAG_DATA_FALLING;
+
+	if (timings->sync_pclk_edge == OMAPDSS_DRIVE_SIG_RISING_EDGE)
+		mode->flags |= OMAP_DRM_MODE_FLAG_SYNC_RISING;
+	else
+		mode->flags |= OMAP_DRM_MODE_FLAG_SYNC_FALLING;
+
+	if (timings->de_level == OMAPDSS_SIG_ACTIVE_HIGH)
+		mode->flags |= OMAP_DRM_MODE_FLAG_PDE;
+	else
+		mode->flags |= OMAP_DRM_MODE_FLAG_NDE;
 }
 
 void copy_timings_drm_to_omap(struct omap_video_timings *timings,
@@ -89,6 +115,7 @@ void copy_timings_drm_to_omap(struct omap_video_timings *timings,
 	timings->vbp = mode->vtotal - mode->vsync_end;
 
 	timings->interlace = !!(mode->flags & DRM_MODE_FLAG_INTERLACE);
+	timings->double_pixel = !!(mode->flags & DRM_MODE_FLAG_DBLCLK);
 
 	if (mode->flags & DRM_MODE_FLAG_PHSYNC)
 		timings->hsync_level = OMAPDSS_SIG_ACTIVE_HIGH;
@@ -100,9 +127,20 @@ void copy_timings_drm_to_omap(struct omap_video_timings *timings,
 	else
 		timings->vsync_level = OMAPDSS_SIG_ACTIVE_LOW;
 
-	timings->data_pclk_edge = OMAPDSS_DRIVE_SIG_RISING_EDGE;
-	timings->de_level = OMAPDSS_SIG_ACTIVE_HIGH;
-	timings->sync_pclk_edge = OMAPDSS_DRIVE_SIG_OPPOSITE_EDGES;
+	if (mode->flags & OMAP_DRM_MODE_FLAG_DATA_RISING)
+		timings->data_pclk_edge = OMAPDSS_DRIVE_SIG_RISING_EDGE;
+	else
+		timings->data_pclk_edge = OMAPDSS_DRIVE_SIG_FALLING_EDGE;
+
+	if (mode->flags & OMAP_DRM_MODE_FLAG_SYNC_RISING)
+		timings->de_level = OMAPDSS_SIG_ACTIVE_HIGH;
+	else
+		timings->de_level = OMAPDSS_SIG_ACTIVE_LOW;
+
+	if (mode->flags & OMAP_DRM_MODE_FLAG_PDE)
+		timings->sync_pclk_edge = OMAPDSS_DRIVE_SIG_RISING_EDGE;
+	else
+		timings->sync_pclk_edge = OMAPDSS_DRIVE_SIG_FALLING_EDGE;
 }
 
 static enum drm_connector_status omap_connector_detect(
@@ -259,10 +297,13 @@ struct drm_encoder *omap_connector_attached_encoder(
 }
 
 static const struct drm_connector_funcs omap_connector_funcs = {
-	.dpms = drm_helper_connector_dpms,
+	.dpms = drm_atomic_helper_connector_dpms,
+	.reset = drm_atomic_helper_connector_reset,
 	.detect = omap_connector_detect,
 	.fill_modes = drm_helper_probe_single_connector_modes,
 	.destroy = omap_connector_destroy,
+	.atomic_duplicate_state = drm_atomic_helper_connector_duplicate_state,
+	.atomic_destroy_state = drm_atomic_helper_connector_destroy_state,
 };
 
 static const struct drm_connector_helper_funcs omap_connector_helper_funcs = {
@@ -270,18 +311,6 @@ static const struct drm_connector_helper_funcs omap_connector_helper_funcs = {
 	.mode_valid = omap_connector_mode_valid,
 	.best_encoder = omap_connector_attached_encoder,
 };
-
-/* flush an area of the framebuffer (in case of manual update display that
- * is not automatically flushed)
- */
-void omap_connector_flush(struct drm_connector *connector,
-		int x, int y, int w, int h)
-{
-	struct omap_connector *omap_connector = to_omap_connector(connector);
-
-	/* TODO: enable when supported in dss */
-	VERB("%s: %d,%d, %dx%d", omap_connector->dssdev->name, x, y, w, h);
-}
 
 /* initialize connector */
 struct drm_connector *omap_connector_init(struct drm_device *dev,

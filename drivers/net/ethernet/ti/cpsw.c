@@ -33,6 +33,7 @@
 #include <linux/of_net.h>
 #include <linux/of_device.h>
 #include <linux/if_vlan.h>
+#include <linux/net_switch_config.h>
 
 #include <linux/pinctrl/consumer.h>
 
@@ -137,19 +138,6 @@ do {								\
 #define CPSW_CMINTMIN_CNT	2
 #define CPSW_CMINTMAX_INTVL	(1000 / CPSW_CMINTMIN_CNT)
 #define CPSW_CMINTMIN_INTVL	((1000 / CPSW_CMINTMAX_CNT) + 1)
-
-#define cpsw_enable_irq(priv)	\
-	do {			\
-		u32 i;		\
-		for (i = 0; i < priv->num_irqs; i++) \
-			enable_irq(priv->irqs_table[i]); \
-	} while (0)
-#define cpsw_disable_irq(priv)	\
-	do {			\
-		u32 i;		\
-		for (i = 0; i < priv->num_irqs; i++) \
-			disable_irq_nosync(priv->irqs_table[i]); \
-	} while (0)
 
 #define cpsw_slave_index(priv)				\
 		((priv->data.dual_emac) ? priv->emac_port :	\
@@ -378,7 +366,8 @@ struct cpsw_priv {
 	spinlock_t			lock;
 	struct platform_device		*pdev;
 	struct net_device		*ndev;
-	struct napi_struct		napi;
+	struct napi_struct		napi_rx;
+	struct napi_struct		napi_tx;
 	struct device			*dev;
 	struct cpsw_platform_data	data;
 	struct cpsw_ss_regs __iomem	*regs;
@@ -399,10 +388,13 @@ struct cpsw_priv {
 	struct cpsw_ale			*ale;
 	bool				rx_pause;
 	bool				tx_pause;
+	u8				port_state[3];
+	bool				quirk_irq;
+	bool				rx_irq_disabled;
+	bool				tx_irq_disabled;
 	/* snapshot of IRQ numbers */
 	u32 irqs_table[4];
 	u32 num_irqs;
-	bool irq_enabled;
 	struct cpts *cpts;
 	u32 emac_port;
 };
@@ -509,9 +501,11 @@ static const struct cpsw_stats cpsw_gstrings_stats[] = {
 				(func)(slave++, ##arg);			\
 	} while (0)
 #define cpsw_get_slave_ndev(priv, __slave_no__)				\
-	(priv->slaves[__slave_no__].ndev)
+	((__slave_no__ < priv->data.slaves) ?				\
+		priv->slaves[__slave_no__].ndev : NULL)
 #define cpsw_get_slave_priv(priv, __slave_no__)				\
-	((priv->slaves[__slave_no__].ndev) ?				\
+	(((__slave_no__ < priv->data.slaves) &&				\
+		(priv->slaves[__slave_no__].ndev)) ?			\
 		netdev_priv(priv->slaves[__slave_no__].ndev) : NULL)	\
 
 #define cpsw_dual_emac_src_port_detect(status, priv, ndev, skb)		\
@@ -726,7 +720,7 @@ static void cpsw_rx_handler(void *token, int len, int status)
 		if (ndev_status && (status >= 0)) {
 			/* The packet received is for the interface which
 			 * is already down and the other interface is up
-			 * and running, intead of freeing which results
+			 * and running, instead of freeing which results
 			 * in reducing of the number of rx descriptor in
 			 * DMA engine, requeue skb back to cpdma.
 			 */
@@ -763,13 +757,15 @@ static irqreturn_t cpsw_tx_interrupt(int irq, void *dev_id)
 {
 	struct cpsw_priv *priv = dev_id;
 
+	writel(0, &priv->wr_regs->tx_en);
 	cpdma_ctlr_eoi(priv->dma, CPDMA_EOI_TX);
-	cpdma_chan_process(priv->txch, 128);
 
-	priv = cpsw_get_slave_priv(priv, 1);
-	if (priv)
-		cpdma_chan_process(priv->txch, 128);
+	if (priv->quirk_irq) {
+		disable_irq_nosync(priv->irqs_table[1]);
+		priv->tx_irq_disabled = true;
+	}
 
+	napi_schedule(&priv->napi_tx);
 	return IRQ_HANDLED;
 }
 
@@ -778,52 +774,55 @@ static irqreturn_t cpsw_rx_interrupt(int irq, void *dev_id)
 	struct cpsw_priv *priv = dev_id;
 
 	cpdma_ctlr_eoi(priv->dma, CPDMA_EOI_RX);
+	writel(0, &priv->wr_regs->rx_en);
 
-	cpsw_intr_disable(priv);
-	if (priv->irq_enabled == true) {
-		cpsw_disable_irq(priv);
-		priv->irq_enabled = false;
+	if (priv->quirk_irq) {
+		disable_irq_nosync(priv->irqs_table[0]);
+		priv->rx_irq_disabled = true;
 	}
 
-	if (netif_running(priv->ndev)) {
-		napi_schedule(&priv->napi);
-		return IRQ_HANDLED;
-	}
-
-	priv = cpsw_get_slave_priv(priv, 1);
-	if (!priv)
-		return IRQ_NONE;
-
-	if (netif_running(priv->ndev)) {
-		napi_schedule(&priv->napi);
-		return IRQ_HANDLED;
-	}
-	return IRQ_NONE;
+	napi_schedule(&priv->napi_rx);
+	return IRQ_HANDLED;
 }
 
-static int cpsw_poll(struct napi_struct *napi, int budget)
+static int cpsw_tx_poll(struct napi_struct *napi_tx, int budget)
 {
-	struct cpsw_priv	*priv = napi_to_priv(napi);
-	int			num_tx, num_rx;
+	struct cpsw_priv	*priv = napi_to_priv(napi_tx);
+	int			num_tx;
 
-	num_tx = cpdma_chan_process(priv->txch, 128);
-
-	num_rx = cpdma_chan_process(priv->rxch, budget);
-	if (num_rx < budget) {
-		struct cpsw_priv *prim_cpsw;
-
-		napi_complete(napi);
-		cpsw_intr_enable(priv);
-		prim_cpsw = cpsw_get_slave_priv(priv, 0);
-		if (prim_cpsw->irq_enabled == false) {
-			prim_cpsw->irq_enabled = true;
-			cpsw_enable_irq(priv);
+	num_tx = cpdma_chan_process(priv->txch, budget);
+	if (num_tx < budget) {
+		napi_complete(napi_tx);
+		writel(0xff, &priv->wr_regs->tx_en);
+		if (priv->quirk_irq && priv->tx_irq_disabled) {
+			priv->tx_irq_disabled = false;
+			enable_irq(priv->irqs_table[1]);
 		}
 	}
 
-	if (num_rx || num_tx)
-		cpsw_dbg(priv, intr, "poll %d rx, %d tx pkts\n",
-			 num_rx, num_tx);
+	if (num_tx)
+		cpsw_dbg(priv, intr, "poll %d tx pkts\n", num_tx);
+
+	return num_tx;
+}
+
+static int cpsw_rx_poll(struct napi_struct *napi_rx, int budget)
+{
+	struct cpsw_priv	*priv = napi_to_priv(napi_rx);
+	int			num_rx;
+
+	num_rx = cpdma_chan_process(priv->rxch, budget);
+	if (num_rx < budget) {
+		napi_complete(napi_rx);
+		writel(0xff, &priv->wr_regs->rx_en);
+		if (priv->quirk_irq && priv->rx_irq_disabled) {
+			priv->rx_irq_disabled = false;
+			enable_irq(priv->irqs_table[0]);
+		}
+	}
+
+	if (num_rx)
+		cpsw_dbg(priv, intr, "poll %d rx pkts\n", num_rx);
 
 	return num_rx;
 }
@@ -868,7 +867,8 @@ static void _cpsw_adjust_link(struct cpsw_slave *slave,
 
 		/* enable forwarding */
 		cpsw_ale_control_set(priv->ale, slave_port,
-				     ALE_PORT_STATE, ALE_PORT_STATE_FORWARD);
+				     ALE_PORT_STATE,
+				     priv->port_state[slave_port]);
 
 		if (phy->speed == 1000)
 			mac_control |= BIT(7);	/* GIGABITEN	*/
@@ -1141,6 +1141,7 @@ static void cpsw_slave_open(struct cpsw_slave *slave, struct cpsw_priv *priv)
 	slave->mac_control = 0;	/* no link yet */
 
 	slave_port = cpsw_get_slave_port(priv, slave->slave_num);
+	priv->port_state[slave_port] = ALE_PORT_STATE_FORWARD;
 
 	if (priv->data.dual_emac)
 		cpsw_add_dual_emac_def_ale_entries(priv, slave, slave_port);
@@ -1244,7 +1245,6 @@ static void cpsw_slave_stop(struct cpsw_slave *slave, struct cpsw_priv *priv)
 static int cpsw_ndo_open(struct net_device *ndev)
 {
 	struct cpsw_priv *priv = netdev_priv(ndev);
-	struct cpsw_priv *prim_cpsw;
 	int i, ret;
 	u32 reg;
 
@@ -1274,6 +1274,8 @@ static int cpsw_ndo_open(struct net_device *ndev)
 				  ALE_ALL_PORTS << priv->host_port, 0, 0);
 
 	if (!cpsw_common_res_usage_state(priv)) {
+		struct cpsw_priv *priv_sl0 = cpsw_get_slave_priv(priv, 0);
+
 		/* setup tx dma to fixed prio and zero offset */
 		cpdma_control_set(priv->dma, CPDMA_TX_PRIO_FIXED, 1);
 		cpdma_control_set(priv->dma, CPDMA_RX_BUFFER_OFFSET, 0);
@@ -1286,6 +1288,19 @@ static int cpsw_ndo_open(struct net_device *ndev)
 
 		/* Enable internal fifo flow control */
 		writel(0x7, &priv->regs->flow_control);
+
+		napi_enable(&priv_sl0->napi_rx);
+		napi_enable(&priv_sl0->napi_tx);
+
+		if (priv_sl0->tx_irq_disabled) {
+			priv_sl0->tx_irq_disabled = false;
+			enable_irq(priv->irqs_table[1]);
+		}
+
+		if (priv_sl0->rx_irq_disabled) {
+			priv_sl0->rx_irq_disabled = false;
+			enable_irq(priv->irqs_table[0]);
+		}
 
 		if (WARN_ON(!priv->data.rx_descs))
 			priv->data.rx_descs = 128;
@@ -1325,17 +1340,8 @@ static int cpsw_ndo_open(struct net_device *ndev)
 		cpsw_set_coalesce(ndev, &coal);
 	}
 
-	napi_enable(&priv->napi);
 	cpdma_ctlr_start(priv->dma);
 	cpsw_intr_enable(priv);
-
-	prim_cpsw = cpsw_get_slave_priv(priv, 0);
-	if (prim_cpsw->irq_enabled == false) {
-		if ((priv == prim_cpsw) || !netif_running(prim_cpsw->ndev)) {
-			prim_cpsw->irq_enabled = true;
-			cpsw_enable_irq(prim_cpsw);
-		}
-	}
 
 	if (priv->data.dual_emac)
 		priv->slaves[priv->emac_port].open_stat = true;
@@ -1355,10 +1361,13 @@ static int cpsw_ndo_stop(struct net_device *ndev)
 
 	cpsw_info(priv, ifdown, "shutting down cpsw device\n");
 	netif_stop_queue(priv->ndev);
-	napi_disable(&priv->napi);
 	netif_carrier_off(priv->ndev);
 
 	if (cpsw_common_res_usage_state(priv) <= 1) {
+		struct cpsw_priv *priv_sl0 = cpsw_get_slave_priv(priv, 0);
+
+		napi_disable(&priv_sl0->napi_rx);
+		napi_disable(&priv_sl0->napi_tx);
 		cpts_unregister(priv->cpts);
 		cpsw_intr_disable(priv);
 		cpdma_ctlr_int_ctrl(priv->dma, false);
@@ -1560,6 +1569,280 @@ static int cpsw_hwtstamp_get(struct net_device *dev, struct ifreq *ifr)
 
 #endif /*CONFIG_TI_CPTS*/
 
+static int cpsw_set_port_state(struct cpsw_priv *priv, int port,
+			       int port_state)
+{
+	switch (port_state) {
+	case PORT_STATE_DISABLED:
+		priv->port_state[port] = ALE_PORT_STATE_DISABLE;
+		break;
+	case PORT_STATE_BLOCKED:
+		priv->port_state[port] = ALE_PORT_STATE_BLOCK;
+		break;
+	case PORT_STATE_LEARN:
+		priv->port_state[port] = ALE_PORT_STATE_LEARN;
+		break;
+	case PORT_STATE_FORWARD:
+		priv->port_state[port] = ALE_PORT_STATE_FORWARD;
+		break;
+	default:
+		dev_err(priv->dev, "Switch config: Invalid port state\n");
+		return -EINVAL;
+	}
+	return cpsw_ale_control_set(priv->ale, port, ALE_PORT_STATE,
+			priv->port_state[port]);
+}
+
+static int cpsw_switch_config_ioctl(struct net_device *ndev,
+				    struct ifreq *ifrq, int cmd)
+{
+	struct cpsw_priv *priv = netdev_priv(ndev);
+	struct net_switch_config config;
+	int ret = -EINVAL;
+
+	if (priv->data.dual_emac) {
+		dev_err(priv->dev, "CPSW not in switch mode\n");
+		return -ENOTSUPP;
+	}
+
+	/* Only SIOCSWITCHCONFIG is used as cmd argument and hence, there is no
+	 * switch statement required.
+	 * Function calls are based on switch_config.cmd
+	 */
+
+	if (copy_from_user(&config, (ifrq->ifr_data), sizeof(config)))
+		return -EFAULT;
+
+	if (config.vid > 4095) {
+		dev_err(priv->dev, "Invalid VLAN id Arguments for cmd %d\n",
+			config.cmd);
+		return ret;
+	}
+
+	switch (config.cmd) {
+	case CONFIG_SWITCH_ADD_MULTICAST:
+		if ((config.port > 0) && (config.port <= 7) &&
+		    is_multicast_ether_addr(config.addr)) {
+			ret = cpsw_ale_add_mcast(priv->ale, config.addr,
+						 config.port, ALE_VLAN,
+						 config.vid, 0);
+		} else {
+			dev_err(priv->dev, "Invalid Arguments for cmd %d\n",
+				config.cmd);
+		}
+		break;
+	case CONFIG_SWITCH_DEL_MULTICAST:
+		if (is_multicast_ether_addr(config.addr)) {
+			ret = cpsw_ale_del_mcast(priv->ale, config.addr,
+						 0, ALE_VLAN, config.vid);
+		} else {
+			dev_err(priv->dev, "Invalid Arguments for cmd %d\n",
+				config.cmd);
+		}
+		break;
+	case CONFIG_SWITCH_ADD_VLAN:
+		if ((config.port > 0) && (config.port <= 7)) {
+			ret = cpsw_ale_add_vlan(priv->ale, config.vid,
+						config.port,
+						config.untag_port,
+						config.reg_multi,
+						config.unreg_multi);
+		} else {
+			dev_err(priv->dev, "Invalid Arguments for cmd %d\n",
+				config.cmd);
+		}
+		break;
+	case CONFIG_SWITCH_DEL_VLAN:
+		ret = cpsw_ale_del_vlan(priv->ale, config.vid, 0);
+		break;
+	case CONFIG_SWITCH_SET_PORT_CONFIG:
+	{
+		struct phy_device *phy = NULL;
+
+		if ((config.port == 1) || (config.port == 2))
+			phy = priv->slaves[config.port - 1].phy;
+
+		if (!phy) {
+			dev_err(priv->dev, "Phy not Found\n");
+			break;
+		}
+
+		config.ecmd.phy_address = phy->addr;
+		ret = phy_ethtool_sset(phy, &config.ecmd);
+		break;
+	}
+	case CONFIG_SWITCH_GET_PORT_CONFIG:
+	{
+		struct phy_device *phy = NULL;
+
+		if ((config.port == 1) || (config.port == 2))
+			phy = priv->slaves[config.port - 1].phy;
+
+		if (!phy) {
+			dev_err(priv->dev, "Phy not Found\n");
+			break;
+		}
+
+		config.ecmd.phy_address = phy->addr;
+		ret = phy_ethtool_gset(phy, &config.ecmd);
+		if (ret)
+			break;
+		ret = copy_to_user(ifrq->ifr_data, &config, sizeof(config));
+		break;
+	}
+	case CONFIG_SWITCH_ADD_UNKNOWN_VLAN_INFO:
+		if ((config.unknown_vlan_member <= 7) &&
+		    (config.unknown_vlan_untag <= 7) &&
+		    (config.unknown_vlan_unreg_multi <= 7) &&
+		    (config.unknown_vlan_reg_multi <= 7)) {
+			cpsw_ale_control_set(priv->ale, 0,
+					     ALE_PORT_UNTAGGED_EGRESS,
+					     config.unknown_vlan_untag);
+			cpsw_ale_control_set(priv->ale, 0,
+					     ALE_PORT_UNKNOWN_REG_MCAST_FLOOD,
+					     config.unknown_vlan_reg_multi);
+			cpsw_ale_control_set(priv->ale, 0,
+					     ALE_PORT_UNKNOWN_MCAST_FLOOD,
+					     config.unknown_vlan_unreg_multi);
+			cpsw_ale_control_set(priv->ale, 0,
+					     ALE_PORT_UNKNOWN_VLAN_MEMBER,
+					     config.unknown_vlan_member);
+			ret = 0;
+		} else {
+			dev_err(priv->dev, "Invalid Unknown VLAN Arguments\n");
+		}
+		break;
+	case CONFIG_SWITCH_GET_PORT_STATE:
+		if (config.port == 1 || config.port == 2) {
+			config.port_state = priv->port_state[config.port];
+			ret = copy_to_user(ifrq->ifr_data, &config,
+					   sizeof(config));
+		} else {
+			dev_err(priv->dev, "Invalid Port number\n");
+		}
+		break;
+	case CONFIG_SWITCH_SET_PORT_STATE:
+		if (config.port == 1 || config.port == 2) {
+			ret = cpsw_set_port_state(priv, config.port,
+						  config.port_state);
+		} else {
+			dev_err(priv->dev, "Invalid Port number\n");
+		}
+		break;
+	case CONFIG_SWITCH_GET_PORT_VLAN_CONFIG:
+	{
+		u32 __iomem *port_vlan_reg;
+		u32 port_vlan;
+
+		switch (config.port) {
+		case 0:
+			port_vlan_reg = &priv->host_port_regs->port_vlan;
+			port_vlan = readl(port_vlan_reg);
+			ret = 0;
+
+			break;
+		case 1:
+		case 2:
+		{
+			int slave = config.port - 1;
+			int reg = CPSW2_PORT_VLAN;
+
+			if (priv->version == CPSW_VERSION_1)
+				reg = CPSW1_PORT_VLAN;
+
+			port_vlan = slave_read(priv->slaves + slave, reg);
+			ret = 0;
+
+			break;
+		}
+		default:
+			dev_err(priv->dev, "Invalid Port number\n");
+			break;
+		}
+
+		if (!ret) {
+			config.vid = port_vlan & 0xfff;
+			config.vlan_cfi = port_vlan & BIT(12) ? true : false;
+			config.prio = (port_vlan >> 13) & 0x7;
+			ret = copy_to_user(ifrq->ifr_data, &config,
+					   sizeof(config));
+		}
+		break;
+	}
+	case CONFIG_SWITCH_SET_PORT_VLAN_CONFIG:
+	{
+		void __iomem *port_vlan_reg;
+		u32 port_vlan;
+
+		port_vlan = config.vid;
+		port_vlan |= config.vlan_cfi ? BIT(12) : 0;
+		port_vlan |= (config.prio & 0x7) << 13;
+
+		switch (config.port) {
+		case 0:
+			port_vlan_reg = &priv->host_port_regs->port_vlan;
+			writel(port_vlan, port_vlan_reg);
+			ret = 0;
+
+			break;
+		case 1:
+		case 2:
+		{
+			int slave = config.port - 1;
+			int reg = CPSW2_PORT_VLAN;
+
+			if (priv->version == CPSW_VERSION_1)
+				reg = CPSW1_PORT_VLAN;
+
+			slave_write(priv->slaves + slave, port_vlan, reg);
+			ret = 0;
+
+			break;
+		}
+		default:
+			dev_err(priv->dev, "Invalid Port number\n");
+			break;
+		}
+
+		break;
+	}
+	case CONFIG_SWITCH_RATELIMIT:
+	{
+		if (config.port > 2) {
+			dev_err(priv->dev, "Invalid Port number\n");
+			break;
+		}
+
+		ret = cpsw_ale_control_set(priv->ale, 0, ALE_RATE_LIMIT_TX,
+					   !!config.direction);
+		if (ret) {
+			dev_err(priv->dev, "CPSW_ALE control set failed");
+			break;
+		}
+
+		ret = cpsw_ale_control_set(priv->ale, config.port,
+					   ALE_PORT_BCAST_LIMIT,
+					   config.bcast_rate_limit);
+		if (ret) {
+			dev_err(priv->dev, "CPSW_ALE control set failed");
+			break;
+		}
+
+		ret = cpsw_ale_control_set(priv->ale, config.port,
+					   ALE_PORT_MCAST_LIMIT,
+					   config.mcast_rate_limit);
+		if (ret)
+			dev_err(priv->dev, "CPSW_ALE control set failed");
+		break;
+	}
+
+	default:
+		ret = -EOPNOTSUPP;
+	}
+
+	return ret;
+}
+
 static int cpsw_ndo_ioctl(struct net_device *dev, struct ifreq *req, int cmd)
 {
 	struct cpsw_priv *priv = netdev_priv(dev);
@@ -1575,6 +1858,8 @@ static int cpsw_ndo_ioctl(struct net_device *dev, struct ifreq *req, int cmd)
 	case SIOCGHWTSTAMP:
 		return cpsw_hwtstamp_get(dev, req);
 #endif
+	case SIOCSWITCHCONFIG:
+		return cpsw_switch_config_ioctl(dev, req, cmd);
 	}
 
 	if (!priv->slaves[slave_no].phy)
@@ -2146,7 +2431,6 @@ static int cpsw_probe_dual_emac(struct platform_device *pdev,
 
 	ndev->netdev_ops = &cpsw_netdev_ops;
 	ndev->ethtool_ops = &cpsw_ethtool_ops;
-	netif_napi_add(ndev, &priv_sl2->napi, cpsw_poll, CPSW_POLL_WEIGHT);
 
 	/* register the network device */
 	SET_NETDEV_DEV(ndev, &pdev->dev);
@@ -2160,6 +2444,44 @@ static int cpsw_probe_dual_emac(struct platform_device *pdev,
 	return ret;
 }
 
+#define CPSW_QUIRK_IRQ		BIT(0)
+
+static struct platform_device_id cpsw_devtype[] = {
+	{
+		/* keep it for existing comaptibles */
+		.name = "cpsw",
+		.driver_data = CPSW_QUIRK_IRQ,
+	}, {
+		.name = "am335x-cpsw",
+		.driver_data = CPSW_QUIRK_IRQ,
+	}, {
+		.name = "am4372-cpsw",
+		.driver_data = 0,
+	}, {
+		.name = "dra7-cpsw",
+		.driver_data = 0,
+	}, {
+		/* sentinel */
+	}
+};
+MODULE_DEVICE_TABLE(platform, cpsw_devtype);
+
+enum ti_cpsw_type {
+	CPSW = 0,
+	AM335X_CPSW,
+	AM4372_CPSW,
+	DRA7_CPSW,
+};
+
+static const struct of_device_id cpsw_of_mtable[] = {
+	{ .compatible = "ti,cpsw", .data = &cpsw_devtype[CPSW], },
+	{ .compatible = "ti,am335x-cpsw", .data = &cpsw_devtype[AM335X_CPSW], },
+	{ .compatible = "ti,am4372-cpsw", .data = &cpsw_devtype[AM4372_CPSW], },
+	{ .compatible = "ti,dra7-cpsw", .data = &cpsw_devtype[DRA7_CPSW], },
+	{ /* sentinel */ },
+};
+MODULE_DEVICE_TABLE(of, cpsw_of_mtable);
+
 static int cpsw_probe(struct platform_device *pdev)
 {
 	struct cpsw_platform_data	*data;
@@ -2169,6 +2491,7 @@ static int cpsw_probe(struct platform_device *pdev)
 	struct cpsw_ale_params		ale_params;
 	void __iomem			*ss_regs;
 	struct resource			*res, *ss_res;
+	const struct of_device_id	*of_id;
 	u32 slave_offset, sliver_offset, slave_size;
 	int ret = 0, i;
 	int irq;
@@ -2188,7 +2511,6 @@ static int cpsw_probe(struct platform_device *pdev)
 	priv->msg_enable = netif_msg_init(debug_level, CPSW_DEBUG);
 	priv->rx_packet_max = max(rx_packet_max, 128);
 	priv->cpts = devm_kzalloc(&pdev->dev, sizeof(struct cpts), GFP_KERNEL);
-	priv->irq_enabled = true;
 	if (!priv->cpts) {
 		dev_err(&pdev->dev, "error allocating cpts\n");
 		ret = -ENOMEM;
@@ -2360,6 +2682,13 @@ static int cpsw_probe(struct platform_device *pdev)
 		goto clean_ale_ret;
 	}
 
+	of_id = of_match_device(cpsw_of_mtable, &pdev->dev);
+	if (of_id) {
+		pdev->id_entry = of_id->data;
+		if (pdev->id_entry->driver_data)
+			priv->quirk_irq = true;
+	}
+
 	/* Grab RX and TX IRQs. Note that we also have RX_THRESHOLD and
 	 * MISC IRQs which are always kept disabled with this driver so
 	 * we will not request them.
@@ -2399,7 +2728,8 @@ static int cpsw_probe(struct platform_device *pdev)
 
 	ndev->netdev_ops = &cpsw_netdev_ops;
 	ndev->ethtool_ops = &cpsw_ethtool_ops;
-	netif_napi_add(ndev, &priv->napi, cpsw_poll, CPSW_POLL_WEIGHT);
+	netif_napi_add(ndev, &priv->napi_rx, cpsw_rx_poll, CPSW_POLL_WEIGHT);
+	netif_napi_add(ndev, &priv->napi_tx, cpsw_tx_poll, CPSW_POLL_WEIGHT);
 
 	/* register the network device */
 	SET_NETDEV_DEV(ndev, &pdev->dev);
@@ -2523,12 +2853,6 @@ static int cpsw_resume(struct device *dev)
 
 static SIMPLE_DEV_PM_OPS(cpsw_pm_ops, cpsw_suspend, cpsw_resume);
 
-static const struct of_device_id cpsw_of_mtable[] = {
-	{ .compatible = "ti,cpsw", },
-	{ /* sentinel */ },
-};
-MODULE_DEVICE_TABLE(of, cpsw_of_mtable);
-
 static struct platform_driver cpsw_driver = {
 	.driver = {
 		.name	 = "cpsw",
@@ -2539,17 +2863,7 @@ static struct platform_driver cpsw_driver = {
 	.remove = cpsw_remove,
 };
 
-static int __init cpsw_init(void)
-{
-	return platform_driver_register(&cpsw_driver);
-}
-late_initcall(cpsw_init);
-
-static void __exit cpsw_exit(void)
-{
-	platform_driver_unregister(&cpsw_driver);
-}
-module_exit(cpsw_exit);
+module_platform_driver(cpsw_driver);
 
 MODULE_LICENSE("GPL");
 MODULE_AUTHOR("Cyril Chemparathy <cyril@ti.com>");

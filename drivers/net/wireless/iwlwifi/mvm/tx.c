@@ -225,7 +225,7 @@ void iwl_mvm_set_tx_cmd_rate(struct iwl_mvm *mvm, struct iwl_tx_cmd *tx_cmd,
 
 	if (info->band == IEEE80211_BAND_2GHZ &&
 	    !iwl_mvm_bt_coex_is_shared_ant_avail(mvm))
-		rate_flags = BIT(mvm->cfg->non_shared_ant) << RATE_MCS_ANT_POS;
+		rate_flags = mvm->cfg->non_shared_ant << RATE_MCS_ANT_POS;
 	else
 		rate_flags =
 			BIT(mvm->mgmt_last_antenna_idx) << RATE_MCS_ANT_POS;
@@ -369,6 +369,15 @@ int iwl_mvm_tx_skb_non_sta(struct iwl_mvm *mvm, struct sk_buff *skb)
 		iwl_trans_free_tx_cmd(mvm->trans, dev_cmd);
 		return -1;
 	}
+
+	/*
+	 * Increase the pending frames counter, so that later when a reply comes
+	 * in and the counter is decreased - we don't start getting negative
+	 * values.
+	 * Note that we don't need to make sure it isn't agg'd, since we're
+	 * TXing non-sta
+	 */
+	atomic_inc(&mvm->pending_frames[sta_id]);
 
 	return 0;
 }
@@ -664,6 +673,8 @@ static void iwl_mvm_rx_tx_cmd_single(struct iwl_mvm *mvm,
 		info->status.rates[0].count = tx_resp->failure_frame + 1;
 		iwl_mvm_hwrate_to_tx_status(le32_to_cpu(tx_resp->initial_rate),
 					    info);
+		info->status.status_driver_data[1] =
+			(void *)(uintptr_t)le32_to_cpu(tx_resp->initial_rate);
 
 		/* Single frame failure in an AMPDU queue => send BAR */
 		if (txq_id >= mvm->first_agg_queue &&
@@ -909,6 +920,8 @@ static void iwl_mvm_tx_info_from_ba_notif(struct ieee80211_tx_info *info,
 	info->status.tx_time = tid_data->tx_time;
 	info->status.status_driver_data[0] =
 		(void *)(uintptr_t)tid_data->reduced_tpc;
+	info->status.status_driver_data[1] =
+		(void *)(uintptr_t)tid_data->rate_n_flags;
 }
 
 int iwl_mvm_rx_ba_notif(struct iwl_mvm *mvm, struct iwl_rx_cmd_buffer *rxb,
@@ -1045,6 +1058,14 @@ out:
 	return 0;
 }
 
+/*
+ * Note that there are transports that buffer frames before they reach
+ * the firmware. This means that after flush_tx_path is called, the
+ * queue might not be empty. The race-free way to handle this is to:
+ * 1) set the station as draining
+ * 2) flush the Tx path
+ * 3) wait for the transport queues to be empty
+ */
 int iwl_mvm_flush_tx_path(struct iwl_mvm *mvm, u32 tfd_msk, bool sync)
 {
 	int ret;

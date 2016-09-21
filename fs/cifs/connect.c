@@ -357,7 +357,6 @@ cifs_reconnect(struct TCP_Server_Info *server)
 	server->session_key.response = NULL;
 	server->session_key.len = 0;
 	server->lstrp = jiffies;
-	mutex_unlock(&server->srv_mutex);
 
 	/* mark submitted MIDs for retry and issue callback */
 	INIT_LIST_HEAD(&retry_list);
@@ -370,6 +369,7 @@ cifs_reconnect(struct TCP_Server_Info *server)
 		list_move(&mid_entry->qhead, &retry_list);
 	}
 	spin_unlock(&GlobalMid_Lock);
+	mutex_unlock(&server->srv_mutex);
 
 	cifs_dbg(FYI, "%s: issuing mid callbacks\n", __func__);
 	list_for_each_safe(tmp, tmp2, &retry_list) {
@@ -386,6 +386,7 @@ cifs_reconnect(struct TCP_Server_Info *server)
 		rc = generic_ip_connect(server);
 		if (rc) {
 			cifs_dbg(FYI, "reconnect error %d\n", rc);
+			mutex_unlock(&server->srv_mutex);
 			msleep(3000);
 		} else {
 			atomic_inc(&tcpSesReconnectCount);
@@ -393,8 +394,8 @@ cifs_reconnect(struct TCP_Server_Info *server)
 			if (server->tcpStatus != CifsExiting)
 				server->tcpStatus = CifsNeedNegotiate;
 			spin_unlock(&GlobalMid_Lock);
+			mutex_unlock(&server->srv_mutex);
 		}
-		mutex_unlock(&server->srv_mutex);
 	} while (server->tcpStatus == CifsNeedReconnect);
 
 	return rc;
@@ -413,7 +414,9 @@ cifs_echo_request(struct work_struct *work)
 	 * server->ops->need_neg() == true. Also, no need to ping if
 	 * we got a response recently.
 	 */
-	if (!server->ops->need_neg || server->ops->need_neg(server) ||
+
+	if (server->tcpStatus == CifsNeedReconnect ||
+	    server->tcpStatus == CifsExiting || server->tcpStatus == CifsNew ||
 	    (server->ops->can_echo && !server->ops->can_echo(server)) ||
 	    time_before(jiffies, server->lstrp + SMB_ECHO_INTERVAL - HZ))
 		goto requeue_echo;
@@ -773,8 +776,7 @@ static void clean_demultiplex_info(struct TCP_Server_Info *server)
 
 	length = atomic_dec_return(&tcpSesAllocCount);
 	if (length > 0)
-		mempool_resize(cifs_req_poolp, length + cifs_min_rcv,
-				GFP_KERNEL);
+		mempool_resize(cifs_req_poolp, length + cifs_min_rcv);
 }
 
 static int
@@ -848,8 +850,7 @@ cifs_demultiplex_thread(void *p)
 
 	length = atomic_inc_return(&tcpSesAllocCount);
 	if (length > 1)
-		mempool_resize(cifs_req_poolp, length + cifs_min_rcv,
-				GFP_KERNEL);
+		mempool_resize(cifs_req_poolp, length + cifs_min_rcv);
 
 	set_freezable();
 	while (server->tcpStatus != CifsExiting) {

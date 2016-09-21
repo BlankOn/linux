@@ -1,7 +1,7 @@
 /*
  * Legacy platform_data quirks
  *
- * Copyright (C) 2013 Texas Instruments
+ * Copyright (C) 2013-2015 Texas Instruments
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 as
@@ -14,10 +14,15 @@
 #include <linux/kernel.h>
 #include <linux/of_platform.h>
 #include <linux/ti_wilink_st.h>
-#include <linux/wl12xx.h>
 
+#include <linux/platform_data/hsmmc-omap.h>
 #include <linux/platform_data/pinctrl-single.h>
 #include <linux/platform_data/iommu-omap.h>
+#include <linux/platform_data/remoteproc-omap.h>
+#include <linux/platform_data/wkup_m3.h>
+#include <linux/platform_data/sgx-omap.h>
+#include <linux/platform_data/pci-dra7xx.h>
+#include <linux/platform_data/remoteproc-pruss.h>
 
 #include "common.h"
 #include "common-board-devices.h"
@@ -26,6 +31,7 @@
 #include "omap_device.h"
 #include "omap-secure.h"
 #include "soc.h"
+#include "remoteproc.h"
 
 struct pdata_init {
 	const char *compatible;
@@ -35,31 +41,22 @@ struct pdata_init {
 struct of_dev_auxdata omap_auxdata_lookup[];
 static struct twl4030_gpio_platform_data twl_gpio_auxdata;
 
-#if IS_ENABLED(CONFIG_WL12XX)
+#if defined(CONFIG_SOC_AM33XX) || defined(CONFIG_SOC_AM43XX)
+static struct gfx_sgx_platform_data sgx_pdata = {
+	.reset_name = "gfx",
+	.assert_reset = omap_device_assert_hardreset,
+	.deassert_reset = omap_device_deassert_hardreset,
+};
+#endif
 
-static struct wl12xx_platform_data wl12xx __initdata;
-
-static void __init __used legacy_init_wl12xx(unsigned ref_clock,
-					     unsigned tcxo_clock,
-					     int gpio)
-{
-	int res;
-
-	wl12xx.board_ref_clock = ref_clock;
-	wl12xx.board_tcxo_clock = tcxo_clock;
-	wl12xx.irq = gpio_to_irq(gpio);
-
-	res = wl12xx_set_platform_data(&wl12xx);
-	if (res) {
-		pr_err("error setting wl12xx data: %d\n", res);
-		return;
-	}
-}
+#if IS_ENABLED(CONFIG_OMAP_IOMMU)
+int omap_iommu_set_pwrdm_constraint(struct platform_device *pdev, bool request,
+				    u8 *pwrst);
 #else
-static inline void legacy_init_wl12xx(unsigned ref_clock,
-				      unsigned tcxo_clock,
-				      int gpio)
+static inline int omap_iommu_set_pwrdm_constraint(struct platform_device *pdev,
+						  bool request, u8 *pwrst)
 {
+	return 0;
 }
 #endif
 
@@ -86,6 +83,13 @@ static struct iommu_platform_data omap3_iommu_pdata = {
 	.reset_name = "mmu",
 	.assert_reset = omap_device_assert_hardreset,
 	.deassert_reset = omap_device_deassert_hardreset,
+	.device_enable = omap_device_enable,
+	.device_idle = omap_device_idle,
+};
+
+static struct iommu_platform_data omap3_iommu_isp_pdata = {
+	.device_enable = omap_device_enable,
+	.device_idle = omap_device_idle,
 };
 
 static int omap3_sbc_t3730_twl_callback(struct device *dev,
@@ -129,7 +133,6 @@ static void __init omap3_sbc_t3730_twl_init(void)
 static void __init omap3_sbc_t3730_legacy_init(void)
 {
 	omap3_sbc_t3x_usb_hub_init(167, "sb-t35 usb hub");
-	legacy_init_wl12xx(WL12XX_REFCLOCK_38, 0, 136);
 }
 
 static void __init omap3_sbc_t3530_legacy_init(void)
@@ -159,14 +162,12 @@ static struct platform_device btwilink_device = {
 
 static void __init omap3_igep0020_rev_f_legacy_init(void)
 {
-	legacy_init_wl12xx(0, 0, 177);
 	platform_device_register(&wl18xx_device);
 	platform_device_register(&btwilink_device);
 }
 
 static void __init omap3_igep0030_rev_g_legacy_init(void)
 {
-	legacy_init_wl12xx(0, 0, 136);
 	platform_device_register(&wl18xx_device);
 	platform_device_register(&btwilink_device);
 }
@@ -174,12 +175,6 @@ static void __init omap3_igep0030_rev_g_legacy_init(void)
 static void __init omap3_evm_legacy_init(void)
 {
 	hsmmc2_internal_input_clk();
-	legacy_init_wl12xx(WL12XX_REFCLOCK_38, 0, 149);
-}
-
-static void __init omap3_zoom_legacy_init(void)
-{
-	legacy_init_wl12xx(WL12XX_REFCLOCK_26, 0, 162);
 }
 
 static void am35xx_enable_emac_int(void)
@@ -246,7 +241,6 @@ static void __init omap3_sbc_t3517_legacy_init(void)
 	am35xx_emac_reset();
 	hsmmc2_internal_input_clk();
 	omap3_sbc_t3517_wifi_init();
-	legacy_init_wl12xx(WL12XX_REFCLOCK_38, 0, 145);
 }
 
 static void __init am3517_evm_legacy_init(void)
@@ -288,42 +282,89 @@ static void __init omap3_tao3530_legacy_init(void)
 }
 #endif /* CONFIG_ARCH_OMAP3 */
 
-#ifdef CONFIG_ARCH_OMAP4
-static void __init omap4_sdp_legacy_init(void)
-{
-	legacy_init_wl12xx(WL12XX_REFCLOCK_26,
-			   WL12XX_TCXOCLOCK_26, 53);
-}
+#if defined(CONFIG_ARCH_OMAP4) || defined(CONFIG_SOC_OMAP5) || \
+	defined(CONFIG_SOC_DRA7XX)
+static struct omap_rproc_timer_ops omap_rproc_dmtimer_ops = {
+	.request_timer = omap_rproc_request_timer,
+	.release_timer = omap_rproc_release_timer,
+	.start_timer = omap_rproc_start_timer,
+	.stop_timer = omap_rproc_stop_timer,
+	.get_timer_irq = omap_rproc_get_timer_irq,
+	.ack_timer_irq = omap_rproc_ack_timer_irq,
+};
 
-static void __init omap4_panda_legacy_init(void)
-{
-	legacy_init_wl12xx(WL12XX_REFCLOCK_38, 0, 53);
-}
+static struct omap_rproc_pdata omap4_ipu_dsp_pdata = {
+	.device_enable = omap_rproc_device_enable,
+	.device_shutdown = omap_rproc_device_shutdown,
+	.timer_ops = &omap_rproc_dmtimer_ops,
+};
 
-static void __init var_som_om44_legacy_init(void)
-{
-	legacy_init_wl12xx(WL12XX_REFCLOCK_38, 0, 41);
-}
-#endif
-
-#if defined(CONFIG_ARCH_OMAP4) || defined(CONFIG_SOC_OMAP5)
 static struct iommu_platform_data omap4_iommu_pdata = {
 	.reset_name = "mmu_cache",
+	.assert_reset = omap_device_assert_hardreset,
+	.deassert_reset = omap_device_deassert_hardreset,
+	.device_enable = omap_device_enable,
+	.device_idle = omap_device_idle,
+};
+#endif
+
+#if defined(CONFIG_SOC_AM33XX) || defined(CONFIG_SOC_AM43XX)
+static struct wkup_m3_platform_data wkup_m3_data = {
+	.reset_name = "wkup_m3",
+	.assert_reset = omap_device_assert_hardreset,
+	.deassert_reset = omap_device_deassert_hardreset,
+};
+
+static struct pruss_platform_data pruss_pdata = {
+	.reset_name = "pruss",
 	.assert_reset = omap_device_assert_hardreset,
 	.deassert_reset = omap_device_deassert_hardreset,
 };
 #endif
 
-#ifdef CONFIG_SOC_AM33XX
-static void __init am335x_evmsk_legacy_init(void)
-{
-	legacy_init_wl12xx(WL12XX_REFCLOCK_38, 0, 31);
-}
-#endif
-
 #ifdef CONFIG_SOC_OMAP5
 static void __init omap5_uevm_legacy_init(void)
 {
+}
+#endif
+
+#ifdef CONFIG_SOC_DRA7XX
+static struct pci_dra7xx_platform_data dra7xx_pci_pdata = {
+	.reset_name = "pcie",
+	.assert_reset = omap_device_assert_hardreset,
+	.deassert_reset = omap_device_deassert_hardreset,
+};
+
+static struct iommu_platform_data dra7_ipu1_dsp_iommu_pdata = {
+	.reset_name = "mmu_cache",
+	.assert_reset = omap_device_assert_hardreset,
+	.deassert_reset = omap_device_deassert_hardreset,
+	.device_enable = omap_device_enable,
+	.device_idle = omap_device_idle,
+	.set_pwrdm_constraint = omap_iommu_set_pwrdm_constraint,
+};
+
+static struct iommu_platform_data dra7_dsp_mmu_edma_pdata = {
+	.device_enable = omap_device_enable,
+	.device_idle = omap_device_idle,
+};
+
+static struct omap_hsmmc_platform_data dra7_hsmmc_data_mmc1;
+static struct omap_hsmmc_platform_data dra7_hsmmc_data_mmc2;
+static struct omap_hsmmc_platform_data dra7_hsmmc_data_mmc3;
+
+static void __init dra7x_evm_mmc_quirk(void)
+{
+	if (omap_rev() == DRA752_REV_ES1_1 || omap_rev() == DRA752_REV_ES1_0) {
+		dra7_hsmmc_data_mmc1.version = "rev11";
+		dra7_hsmmc_data_mmc1.max_freq = 96000000;
+
+		dra7_hsmmc_data_mmc2.version = "rev11";
+		dra7_hsmmc_data_mmc2.max_freq = 48000000;
+
+		dra7_hsmmc_data_mmc3.version = "rev11";
+		dra7_hsmmc_data_mmc3.max_freq = 48000000;
+	}
 }
 #endif
 
@@ -378,24 +419,78 @@ struct of_dev_auxdata omap_auxdata_lookup[] __initdata = {
 	OF_DEV_AUXDATA("ti,omap3-padconf", 0x48002a00, "48002a00.pinmux", &pcs_pdata),
 	OF_DEV_AUXDATA("ti,omap2-iommu", 0x5d000000, "5d000000.mmu",
 		       &omap3_iommu_pdata),
+	OF_DEV_AUXDATA("ti,omap2-iommu", 0x480bd400, "480bd400.mmu",
+		       &omap3_iommu_isp_pdata),
 	/* Only on am3517 */
 	OF_DEV_AUXDATA("ti,davinci_mdio", 0x5c030000, "davinci_mdio.0", NULL),
 	OF_DEV_AUXDATA("ti,am3517-emac", 0x5c000000, "davinci_emac.0",
 		       &am35xx_emac_pdata),
 #endif
+#ifdef CONFIG_SOC_AM33XX
+	OF_DEV_AUXDATA("ti,am3352-wkup-m3", 0x44d00000, "44d00000.wkup_m3",
+		       &wkup_m3_data),
+	OF_DEV_AUXDATA("ti,am3352-pruss", 0x4a300000, "4a300000.pruss",
+		       &pruss_pdata),
+	OF_DEV_AUXDATA("ti,am3352-sgx530", 0x56000000, "56000000.sgx",
+		       &sgx_pdata),
+#endif
 #ifdef CONFIG_ARCH_OMAP4
 	OF_DEV_AUXDATA("ti,omap4-padconf", 0x4a100040, "4a100040.pinmux", &pcs_pdata),
 	OF_DEV_AUXDATA("ti,omap4-padconf", 0x4a31e040, "4a31e040.pinmux", &pcs_pdata),
+	OF_DEV_AUXDATA("ti,omap4-rproc-dsp", 0, "dsp", &omap4_ipu_dsp_pdata),
+	OF_DEV_AUXDATA("ti,omap4-rproc-ipu", 0x55020000, "ipu",
+		       &omap4_ipu_dsp_pdata),
 #endif
 #ifdef CONFIG_SOC_OMAP5
 	OF_DEV_AUXDATA("ti,omap5-padconf", 0x4a002840, "4a002840.pinmux", &pcs_pdata),
 	OF_DEV_AUXDATA("ti,omap5-padconf", 0x4ae0c840, "4ae0c840.pinmux", &pcs_pdata),
+	OF_DEV_AUXDATA("ti,omap5-rproc-dsp", 0, "dsp", &omap4_ipu_dsp_pdata),
+	OF_DEV_AUXDATA("ti,omap5-rproc-ipu", 0x55020000, "ipu",
+		       &omap4_ipu_dsp_pdata),
 #endif
 #ifdef CONFIG_SOC_DRA7XX
 	OF_DEV_AUXDATA("ti,dra7-padconf", 0x4a003400, "4a003400.pinmux", &pcs_pdata),
+	OF_DEV_AUXDATA("ti,dra7-pcie", 0x51000000, "51000000.pcie", &dra7xx_pci_pdata),
+	OF_DEV_AUXDATA("ti,dra72-pcie", 0x51000000, "51000000.pcie",
+		       &dra7xx_pci_pdata),
+	OF_DEV_AUXDATA("ti,dra7-pcie", 0x51800000, "51800000.pcie", &dra7xx_pci_pdata),
+	OF_DEV_AUXDATA("ti,dra72-pcie", 0x51800000, "51800000.pcie",
+		       &dra7xx_pci_pdata),
+	OF_DEV_AUXDATA("ti,dra7-dsp-iommu", 0x40d01000, "40d01000.mmu",
+		       &dra7_ipu1_dsp_iommu_pdata),
+	OF_DEV_AUXDATA("ti,dra7-dsp-iommu", 0x41501000, "41501000.mmu",
+		       &dra7_ipu1_dsp_iommu_pdata),
+	OF_DEV_AUXDATA("ti,dra7-dsp-iommu", 0x40d02000, "40d02000.mmu",
+		       &dra7_dsp_mmu_edma_pdata),
+	OF_DEV_AUXDATA("ti,dra7-dsp-iommu", 0x41502000, "41502000.mmu",
+		       &dra7_dsp_mmu_edma_pdata),
+	OF_DEV_AUXDATA("ti,dra7-iommu", 0x55082000, "55082000.mmu",
+		       &omap4_iommu_pdata),
+	OF_DEV_AUXDATA("ti,dra7-iommu", 0x58882000, "58882000.mmu",
+		       &dra7_ipu1_dsp_iommu_pdata),
+	OF_DEV_AUXDATA("ti,dra7-rproc-ipu", 0x55020000, "55020000.ipu",
+		       &omap4_ipu_dsp_pdata),
+	OF_DEV_AUXDATA("ti,dra7-rproc-ipu", 0x58820000, "58820000.ipu",
+		       &omap4_ipu_dsp_pdata),
+	OF_DEV_AUXDATA("ti,dra7-rproc-dsp", 0x40800000, "40800000.dsp",
+		       &omap4_ipu_dsp_pdata),
+	OF_DEV_AUXDATA("ti,dra7-rproc-dsp", 0x41000000, "41000000.dsp",
+		       &omap4_ipu_dsp_pdata),
+	OF_DEV_AUXDATA("ti,dra7-hsmmc", 0x4809c000, "4809c000.mmc",
+		       &dra7_hsmmc_data_mmc1),
+	OF_DEV_AUXDATA("ti,dra7-hsmmc", 0x480b4000, "480b4000.mmc",
+		       &dra7_hsmmc_data_mmc2),
+	OF_DEV_AUXDATA("ti,dra7-hsmmc", 0x480ad000, "480ad000.mmc",
+		       &dra7_hsmmc_data_mmc3),
 #endif
 #ifdef CONFIG_SOC_AM43XX
 	OF_DEV_AUXDATA("ti,am437-padconf", 0x44e10800, "44e10800.pinmux", &pcs_pdata),
+	OF_DEV_AUXDATA("ti,am4372-wkup-m3", 0x44d00000, "44d00000.wkup_m3",
+		       &wkup_m3_data),
+	OF_DEV_AUXDATA("ti,am4372-pruss", 0x54400000, "54400000.pruss",
+		       &pruss_pdata),
+	OF_DEV_AUXDATA("ti,am4376-sgx530", 0x56000000, "56000000.sgx",
+		       &sgx_pdata),
 #endif
 #if defined(CONFIG_ARCH_OMAP4) || defined(CONFIG_SOC_OMAP5)
 	OF_DEV_AUXDATA("ti,omap4-iommu", 0x4a066000, "4a066000.mmu",
@@ -421,21 +516,14 @@ static struct pdata_init pdata_quirks[] __initdata = {
 	{ "isee,omap3-igep0020-rev-f", omap3_igep0020_rev_f_legacy_init, },
 	{ "isee,omap3-igep0030-rev-g", omap3_igep0030_rev_g_legacy_init, },
 	{ "ti,omap3-evm-37xx", omap3_evm_legacy_init, },
-	{ "ti,omap3-zoom3", omap3_zoom_legacy_init, },
 	{ "ti,am3517-evm", am3517_evm_legacy_init, },
 	{ "technexion,omap3-tao3530", omap3_tao3530_legacy_init, },
 #endif
-#ifdef CONFIG_ARCH_OMAP4
-	{ "ti,omap4-sdp", omap4_sdp_legacy_init, },
-	{ "ti,omap4-panda", omap4_panda_legacy_init, },
-	{ "variscite,var-dvk-om44", var_som_om44_legacy_init, },
-	{ "variscite,var-stk-om44", var_som_om44_legacy_init, },
-#endif
-#ifdef CONFIG_SOC_AM33XX
-	{ "ti,am335x-evmsk", am335x_evmsk_legacy_init, },
-#endif
 #ifdef CONFIG_SOC_OMAP5
 	{ "ti,omap5-uevm", omap5_uevm_legacy_init, },
+#endif
+#ifdef CONFIG_SOC_DRA7XX
+	{ "ti,dra7-evm", dra7x_evm_mmc_quirk, },
 #endif
 	{ /* sentinel */ },
 };
@@ -454,7 +542,14 @@ static void pdata_quirks_check(struct pdata_init *quirks)
 
 void __init pdata_quirks_init(const struct of_device_id *omap_dt_match_table)
 {
-	omap_sdrc_init(NULL, NULL);
+	/*
+	 * We still need this for omap2420 and omap3 PM to work, others are
+	 * using drivers/misc/sram.c already.
+	 */
+	if (of_machine_is_compatible("ti,omap2420") ||
+	    of_machine_is_compatible("ti,omap3"))
+		omap_sdrc_init(NULL, NULL);
+
 	pdata_quirks_check(auxdata_quirks);
 	of_platform_populate(NULL, omap_dt_match_table,
 			     omap_auxdata_lookup, NULL);

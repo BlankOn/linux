@@ -162,19 +162,6 @@ static void subscr_del(struct tipc_subscription *sub)
 	atomic_dec(&tn->subscription_count);
 }
 
-/**
- * subscr_terminate - terminate communication with a subscriber
- *
- * Note: Must call it in process context since it might sleep.
- */
-static void subscr_terminate(struct tipc_subscription *sub)
-{
-	struct tipc_subscriber *subscriber = sub->subscriber;
-	struct tipc_net *tn = net_generic(sub->net, tipc_net_id);
-
-	tipc_conn_terminate(tn->topsrv, subscriber->conid);
-}
-
 static void subscr_release(struct tipc_subscriber *subscriber)
 {
 	struct tipc_subscription *sub;
@@ -312,15 +299,12 @@ static void subscr_conn_msg_event(struct net *net, int conid,
 {
 	struct tipc_subscriber *subscriber = usr_data;
 	struct tipc_subscription *sub = NULL;
+	struct tipc_net *tn = net_generic(net, tipc_net_id);
 
 	spin_lock_bh(&subscriber->lock);
-	if (subscr_subscribe(net, (struct tipc_subscr *)buf, subscriber,
-			     &sub) < 0) {
-		spin_unlock_bh(&subscriber->lock);
-		subscr_terminate(sub);
-		return;
-	}
-	if (sub)
+	if (subscr_subscribe(net, (struct tipc_subscr *)buf, subscriber, &sub))
+		tipc_conn_terminate(tn->topsrv, subscriber->conid);
+	else
 		tipc_nametbl_subscribe(sub);
 	spin_unlock_bh(&subscriber->lock);
 }

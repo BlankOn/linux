@@ -382,11 +382,11 @@ static bool rcar_i2c_slave_irq(struct rcar_i2c_priv *priv)
 	if (ssr_filtered & SAR) {
 		/* read or write request */
 		if (ssr_raw & STM) {
-			i2c_slave_event(priv->slave, I2C_SLAVE_REQ_READ_START, &value);
+			i2c_slave_event(priv->slave, I2C_SLAVE_READ_REQUESTED, &value);
 			rcar_i2c_write(priv, ICRXTX, value);
 			rcar_i2c_write(priv, ICSIER, SDE | SSR | SAR);
 		} else {
-			i2c_slave_event(priv->slave, I2C_SLAVE_REQ_WRITE_START, &value);
+			i2c_slave_event(priv->slave, I2C_SLAVE_WRITE_REQUESTED, &value);
 			rcar_i2c_read(priv, ICRXTX);	/* dummy read */
 			rcar_i2c_write(priv, ICSIER, SDR | SSR | SAR);
 		}
@@ -406,17 +406,15 @@ static bool rcar_i2c_slave_irq(struct rcar_i2c_priv *priv)
 		int ret;
 
 		value = rcar_i2c_read(priv, ICRXTX);
-		ret = i2c_slave_event(priv->slave, I2C_SLAVE_REQ_WRITE_END, &value);
+		ret = i2c_slave_event(priv->slave, I2C_SLAVE_WRITE_RECEIVED, &value);
 		/* Send NACK in case of error */
 		rcar_i2c_write(priv, ICSCR, SIE | SDBS | (ret < 0 ? FNA : 0));
-		i2c_slave_event(priv->slave, I2C_SLAVE_REQ_WRITE_START, &value);
 		rcar_i2c_write(priv, ICSSR, ~SDR & 0xff);
 	}
 
 	/* master wants to read from us */
 	if (ssr_filtered & SDE) {
-		i2c_slave_event(priv->slave, I2C_SLAVE_REQ_READ_END, &value);
-		i2c_slave_event(priv->slave, I2C_SLAVE_REQ_READ_START, &value);
+		i2c_slave_event(priv->slave, I2C_SLAVE_READ_PROCESSED, &value);
 		rcar_i2c_write(priv, ICRXTX, value);
 		rcar_i2c_write(priv, ICSSR, ~SDE & 0xff);
 	}
@@ -690,14 +688,15 @@ static int rcar_i2c_probe(struct platform_device *pdev)
 		return ret;
 	}
 
+	pm_runtime_enable(dev);
+	platform_set_drvdata(pdev, priv);
+
 	ret = i2c_add_numbered_adapter(adap);
 	if (ret < 0) {
 		dev_err(dev, "reg adap failed: %d\n", ret);
+		pm_runtime_disable(dev);
 		return ret;
 	}
-
-	pm_runtime_enable(dev);
-	platform_set_drvdata(pdev, priv);
 
 	dev_info(dev, "probed\n");
 

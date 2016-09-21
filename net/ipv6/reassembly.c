@@ -108,7 +108,10 @@ bool ip6_frag_match(const struct inet_frag_queue *q, const void *a)
 	return	fq->id == arg->id &&
 		fq->user == arg->user &&
 		ipv6_addr_equal(&fq->saddr, arg->src) &&
-		ipv6_addr_equal(&fq->daddr, arg->dst);
+		ipv6_addr_equal(&fq->daddr, arg->dst) &&
+		(arg->iif == fq->iif ||
+		 !(ipv6_addr_type(arg->dst) & (IPV6_ADDR_MULTICAST |
+					       IPV6_ADDR_LINKLOCAL)));
 }
 EXPORT_SYMBOL(ip6_frag_match);
 
@@ -180,7 +183,7 @@ static void ip6_frag_expire(unsigned long data)
 
 static struct frag_queue *
 fq_find(struct net *net, __be32 id, const struct in6_addr *src,
-	const struct in6_addr *dst, u8 ecn)
+	const struct in6_addr *dst, int iif, u8 ecn)
 {
 	struct inet_frag_queue *q;
 	struct ip6_create_arg arg;
@@ -190,6 +193,7 @@ fq_find(struct net *net, __be32 id, const struct in6_addr *src,
 	arg.user = IP6_DEFRAG_LOCAL_DELIVER;
 	arg.src = src;
 	arg.dst = dst;
+	arg.iif = iif;
 	arg.ecn = ecn;
 
 	hash = inet6_hash_frag(id, src, dst);
@@ -430,7 +434,7 @@ static int ip6_frag_reasm(struct frag_queue *fq, struct sk_buff *prev,
 		int i, plen = 0;
 
 		clone = alloc_skb(0, GFP_ATOMIC);
-		if (clone == NULL)
+		if (!clone)
 			goto out_oom;
 		clone->next = head->next;
 		head->next = clone;
@@ -551,8 +555,8 @@ static int ipv6_frag_rcv(struct sk_buff *skb)
 	}
 
 	fq = fq_find(net, fhdr->identification, &hdr->saddr, &hdr->daddr,
-		     ip6_frag_ecn(hdr));
-	if (fq != NULL) {
+		     skb->dev ? skb->dev->ifindex : 0, ip6_frag_ecn(hdr));
+	if (fq) {
 		int ret;
 
 		spin_lock(&fq->q.lock);
@@ -632,7 +636,7 @@ static int __net_init ip6_frags_ns_sysctl_register(struct net *net)
 	table = ip6_frags_ns_ctl_table;
 	if (!net_eq(net, &init_net)) {
 		table = kmemdup(table, sizeof(ip6_frags_ns_ctl_table), GFP_KERNEL);
-		if (table == NULL)
+		if (!table)
 			goto err_alloc;
 
 		table[0].data = &net->ipv6.frags.high_thresh;
@@ -648,7 +652,7 @@ static int __net_init ip6_frags_ns_sysctl_register(struct net *net)
 	}
 
 	hdr = register_net_sysctl(net, "net/ipv6", table);
-	if (hdr == NULL)
+	if (!hdr)
 		goto err_reg;
 
 	net->ipv6.sysctl.frags_hdr = hdr;

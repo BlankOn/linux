@@ -93,6 +93,7 @@ extern void omap3_sync32k_timer_init(void);
 extern void omap3_secure_sync32k_timer_init(void);
 extern void omap3_gptimer_timer_init(void);
 extern void omap4_local_timer_init(void);
+extern void am43xx_gptimer_timer_init(void);
 #ifdef CONFIG_CACHE_L2X0
 int omap_l2_cache_init(void);
 #define OMAP_L2C_AUX_CTRL	(L2C_AUX_CTRL_SHARED_OVERRIDE | \
@@ -189,6 +190,15 @@ static inline void omap44xx_restart(enum reboot_mode mode, const char *cmd)
 }
 #endif
 
+#ifdef CONFIG_OMAP_INTERCONNECT_BARRIER
+void omap_barrier_reserve_memblock(void);
+void omap_barriers_init(void);
+#else
+static inline void omap_barrier_reserve_memblock(void)
+{
+}
+#endif
+
 /* This gets called from mach-omap2/io.c, do not call this */
 void __init omap2_set_globals_tap(u32 class, void __iomem *tap);
 
@@ -198,10 +208,8 @@ void __init omap3_map_io(void);
 void __init am33xx_map_io(void);
 void __init omap4_map_io(void);
 void __init omap5_map_io(void);
+void __init dra7xx_map_io(void);
 void __init ti81xx_map_io(void);
-
-/* omap_barriers_init() is OMAP4 only */
-void omap_barriers_init(void);
 
 /**
  * omap_test_timeout - busy-loop, testing a condition

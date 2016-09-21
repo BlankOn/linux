@@ -62,6 +62,7 @@ int do_truncate(struct dentry *dentry, loff_t length, unsigned int time_attrs,
 	mutex_unlock(&dentry->d_inode->i_mutex);
 	return ret;
 }
+EXPORT_SYMBOL_GPL(do_truncate);
 
 long vfs_truncate(struct path *path, loff_t length)
 {
@@ -231,8 +232,7 @@ int vfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 		return -EINVAL;
 
 	/* Return error if mode is not supported */
-	if (mode & ~(FALLOC_FL_KEEP_SIZE | FALLOC_FL_PUNCH_HOLE |
-		     FALLOC_FL_COLLAPSE_RANGE | FALLOC_FL_ZERO_RANGE))
+	if (mode & ~FALLOC_FL_SUPPORTED_MASK)
 		return -EOPNOTSUPP;
 
 	/* Punch hole and zero range are mutually exclusive */
@@ -248,6 +248,11 @@ int vfs_fallocate(struct file *file, int mode, loff_t offset, loff_t len)
 	/* Collapse range should only be used exclusively. */
 	if ((mode & FALLOC_FL_COLLAPSE_RANGE) &&
 	    (mode & ~FALLOC_FL_COLLAPSE_RANGE))
+		return -EINVAL;
+
+	/* Insert range should only be used exclusively. */
+	if ((mode & FALLOC_FL_INSERT_RANGE) &&
+	    (mode & ~FALLOC_FL_INSERT_RANGE))
 		return -EINVAL;
 
 	if (!(file->f_mode & FMODE_WRITE))
@@ -570,6 +575,7 @@ static int chown_common(struct path *path, uid_t user, gid_t group)
 	uid = make_kuid(current_user_ns(), user);
 	gid = make_kgid(current_user_ns(), group);
 
+retry_deleg:
 	newattrs.ia_valid =  ATTR_CTIME;
 	if (user != (uid_t) -1) {
 		if (!uid_valid(uid))
@@ -586,7 +592,6 @@ static int chown_common(struct path *path, uid_t user, gid_t group)
 	if (!S_ISDIR(inode->i_mode))
 		newattrs.ia_valid |=
 			ATTR_KILL_SUID | ATTR_KILL_SGID | ATTR_KILL_PRIV;
-retry_deleg:
 	mutex_lock(&inode->i_mutex);
 	error = security_path_chown(path, uid, gid);
 	if (!error)
@@ -672,20 +677,21 @@ int open_check_o_direct(struct file *f)
 	}
 	return 0;
 }
+EXPORT_SYMBOL_GPL(open_check_o_direct);
 
 static int do_dentry_open(struct file *f,
+			  struct inode *inode,
 			  int (*open)(struct inode *, struct file *),
 			  const struct cred *cred)
 {
 	static const struct file_operations empty_fops = {};
-	struct inode *inode;
 	int error;
 
 	f->f_mode = OPEN_FMODE(f->f_flags) | FMODE_LSEEK |
 				FMODE_PREAD | FMODE_PWRITE;
 
 	path_get(&f->f_path);
-	inode = f->f_inode = f->f_path.dentry->d_inode;
+	f->f_inode = inode;
 	f->f_mapping = inode->i_mapping;
 
 	if (unlikely(f->f_flags & O_PATH)) {
@@ -734,10 +740,10 @@ static int do_dentry_open(struct file *f,
 	if ((f->f_mode & (FMODE_READ | FMODE_WRITE)) == FMODE_READ)
 		i_readcount_inc(inode);
 	if ((f->f_mode & FMODE_READ) &&
-	     likely(f->f_op->read || f->f_op->aio_read || f->f_op->read_iter))
+	     likely(f->f_op->read || f->f_op->read_iter))
 		f->f_mode |= FMODE_CAN_READ;
 	if ((f->f_mode & FMODE_WRITE) &&
-	     likely(f->f_op->write || f->f_op->aio_write || f->f_op->write_iter))
+	     likely(f->f_op->write || f->f_op->write_iter))
 		f->f_mode |= FMODE_CAN_WRITE;
 
 	f->f_flags &= ~(O_CREAT | O_EXCL | O_NOCTTY | O_TRUNC);
@@ -789,7 +795,8 @@ int finish_open(struct file *file, struct dentry *dentry,
 	BUG_ON(*opened & FILE_OPENED); /* once it's opened, it's opened */
 
 	file->f_path.dentry = dentry;
-	error = do_dentry_open(file, open, current_cred());
+	error = do_dentry_open(file, d_backing_inode(dentry), open,
+			       current_cred());
 	if (!error)
 		*opened |= FILE_OPENED;
 
@@ -817,6 +824,28 @@ int finish_no_open(struct file *file, struct dentry *dentry)
 	return 1;
 }
 EXPORT_SYMBOL(finish_no_open);
+
+/**
+ * vfs_open - open the file at the given path
+ * @path: path to open
+ * @file: newly allocated file with f_flag initialized
+ * @cred: credentials to use
+ */
+int vfs_open(const struct path *path, struct file *file,
+	     const struct cred *cred)
+{
+	struct dentry *dentry = path->dentry;
+	struct inode *inode = dentry->d_inode;
+
+	file->f_path = *path;
+	if (dentry->d_flags & DCACHE_OP_SELECT_INODE) {
+		inode = dentry->d_op->d_select_inode(dentry, file->f_flags);
+		if (IS_ERR(inode))
+			return PTR_ERR(inode);
+	}
+
+	return do_dentry_open(file, inode, NULL, cred);
+}
 
 struct file *dentry_open(const struct path *path, int flags,
 			 const struct cred *cred)
@@ -848,26 +877,6 @@ struct file *dentry_open(const struct path *path, int flags,
 	return f;
 }
 EXPORT_SYMBOL(dentry_open);
-
-/**
- * vfs_open - open the file at the given path
- * @path: path to open
- * @filp: newly allocated file with f_flag initialized
- * @cred: credentials to use
- */
-int vfs_open(const struct path *path, struct file *filp,
-	     const struct cred *cred)
-{
-	struct inode *inode = path->dentry->d_inode;
-
-	if (inode->i_op->dentry_open)
-		return inode->i_op->dentry_open(path->dentry, filp, cred);
-	else {
-		filp->f_path = *path;
-		return do_dentry_open(filp, NULL, cred);
-	}
-}
-EXPORT_SYMBOL(vfs_open);
 
 static inline int build_open_flags(int flags, umode_t mode, struct open_flags *op)
 {
@@ -980,17 +989,12 @@ struct file *filp_open(const char *filename, int flags, umode_t mode)
 EXPORT_SYMBOL(filp_open);
 
 struct file *file_open_root(struct dentry *dentry, struct vfsmount *mnt,
-			    const char *filename, int flags)
+			    const char *filename, int flags, umode_t mode)
 {
 	struct open_flags op;
-	int err = build_open_flags(flags, 0, &op);
+	int err = build_open_flags(flags, mode, &op);
 	if (err)
 		return ERR_PTR(err);
-	if (flags & O_CREAT)
-		return ERR_PTR(-EINVAL);
-	if (!filename && (flags & O_DIRECTORY))
-		if (!dentry->d_inode->i_op->lookup)
-			return ERR_PTR(-ENOTDIR);
 	return do_file_open_root(dentry, mnt, filename, &op);
 }
 EXPORT_SYMBOL(file_open_root);

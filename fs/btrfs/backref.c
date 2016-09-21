@@ -880,6 +880,8 @@ static int __add_keyed_refs(struct btrfs_fs_info *fs_info,
  * indirect refs to their parent bytenr.
  * When roots are found, they're added to the roots list
  *
+ * NOTE: This can return values > 0
+ *
  * FIXME some caching might speed things up
  */
 static int find_parent_nodes(struct btrfs_trans_handle *trans,
@@ -1198,6 +1200,19 @@ int btrfs_find_all_roots(struct btrfs_trans_handle *trans,
 	return ret;
 }
 
+/**
+ * btrfs_check_shared - tell us whether an extent is shared
+ *
+ * @trans: optional trans handle
+ *
+ * btrfs_check_shared uses the backref walking code but will short
+ * circuit as soon as it finds a root or inode that doesn't match the
+ * one passed in. This provides a significant performance benefit for
+ * callers (such as fiemap) which want to know whether the extent is
+ * shared but do not need a ref count.
+ *
+ * Return: 0 if extent is not shared, 1 if it is shared, < 0 on error.
+ */
 int btrfs_check_shared(struct btrfs_trans_handle *trans,
 		       struct btrfs_fs_info *fs_info, u64 root_objectid,
 		       u64 inum, u64 bytenr)
@@ -1206,7 +1221,7 @@ int btrfs_check_shared(struct btrfs_trans_handle *trans,
 	struct ulist *roots = NULL;
 	struct ulist_iterator uiter;
 	struct ulist_node *node;
-	struct seq_list elem = {};
+	struct seq_list elem = SEQ_LIST_INIT(elem);
 	int ret = 0;
 
 	tmp = ulist_alloc(GFP_NOFS);
@@ -1226,11 +1241,13 @@ int btrfs_check_shared(struct btrfs_trans_handle *trans,
 		ret = find_parent_nodes(trans, fs_info, bytenr, elem.seq, tmp,
 					roots, NULL, root_objectid, inum);
 		if (ret == BACKREF_FOUND_SHARED) {
+			/* this is the only condition under which we return 1 */
 			ret = 1;
 			break;
 		}
 		if (ret < 0 && ret != -ENOENT)
 			break;
+		ret = 0;
 		node = ulist_next(tmp, &uiter);
 		if (!node)
 			break;
@@ -1352,7 +1369,8 @@ char *btrfs_ref_to_path(struct btrfs_root *fs_root, struct btrfs_path *path,
 			read_extent_buffer(eb, dest + bytes_left,
 					   name_off, name_len);
 		if (eb != eb_in) {
-			btrfs_tree_read_unlock_blocking(eb);
+			if (!path->skip_locking)
+				btrfs_tree_read_unlock_blocking(eb);
 			free_extent_buffer(eb);
 		}
 		ret = btrfs_find_item(fs_root, path, parent, 0,
@@ -1372,9 +1390,10 @@ char *btrfs_ref_to_path(struct btrfs_root *fs_root, struct btrfs_path *path,
 		eb = path->nodes[0];
 		/* make sure we can use eb after releasing the path */
 		if (eb != eb_in) {
-			atomic_inc(&eb->refs);
-			btrfs_tree_read_lock(eb);
-			btrfs_set_lock_blocking_rw(eb, BTRFS_READ_LOCK);
+			if (!path->skip_locking)
+				btrfs_set_lock_blocking_rw(eb, BTRFS_READ_LOCK);
+			path->nodes[0] = NULL;
+			path->locks[0] = 0;
 		}
 		btrfs_release_path(path);
 		iref = btrfs_item_ptr(eb, slot, struct btrfs_inode_ref);
@@ -1610,7 +1629,7 @@ int iterate_extent_inodes(struct btrfs_fs_info *fs_info,
 	struct ulist *roots = NULL;
 	struct ulist_node *ref_node = NULL;
 	struct ulist_node *root_node = NULL;
-	struct seq_list tree_mod_seq_elem = {};
+	struct seq_list tree_mod_seq_elem = SEQ_LIST_INIT(tree_mod_seq_elem);
 	struct ulist_iterator ref_uiter;
 	struct ulist_iterator root_uiter;
 
@@ -1769,7 +1788,6 @@ static int iterate_inode_extrefs(u64 inum, struct btrfs_root *fs_root,
 	int found = 0;
 	struct extent_buffer *eb;
 	struct btrfs_inode_extref *extref;
-	struct extent_buffer *leaf;
 	u32 item_size;
 	u32 cur_offset;
 	unsigned long ptr;
@@ -1797,9 +1815,8 @@ static int iterate_inode_extrefs(u64 inum, struct btrfs_root *fs_root,
 		btrfs_set_lock_blocking_rw(eb, BTRFS_READ_LOCK);
 		btrfs_release_path(path);
 
-		leaf = path->nodes[0];
-		item_size = btrfs_item_size_nr(leaf, slot);
-		ptr = btrfs_item_ptr_offset(leaf, slot);
+		item_size = btrfs_item_size_nr(eb, slot);
+		ptr = btrfs_item_ptr_offset(eb, slot);
 		cur_offset = 0;
 
 		while (cur_offset < item_size) {
@@ -1813,7 +1830,7 @@ static int iterate_inode_extrefs(u64 inum, struct btrfs_root *fs_root,
 			if (ret)
 				break;
 
-			cur_offset += btrfs_inode_extref_name_len(leaf, extref);
+			cur_offset += btrfs_inode_extref_name_len(eb, extref);
 			cur_offset += sizeof(*extref);
 		}
 		btrfs_tree_read_unlock_blocking(eb);

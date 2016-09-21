@@ -104,7 +104,8 @@
 #define USB_TX_AGG		0xd40a
 #define USB_RX_BUF_TH		0xd40c
 #define USB_USB_TIMER		0xd428
-#define USB_RX_EARLY_AGG	0xd42c
+#define USB_RX_EARLY_TIMEOUT	0xd42c
+#define USB_RX_EARLY_SIZE	0xd42e
 #define USB_PM_CTRL_STATUS	0xd432
 #define USB_TX_DMA		0xd434
 #define USB_TOLERANCE		0xd490
@@ -349,10 +350,10 @@
 /* USB_MISC_0 */
 #define PCUT_STATUS		0x0001
 
-/* USB_RX_EARLY_AGG */
-#define EARLY_AGG_SUPPER	0x0e832981
-#define EARLY_AGG_HIGH		0x0e837a12
-#define EARLY_AGG_SLOW		0x0e83ffff
+/* USB_RX_EARLY_TIMEOUT */
+#define COALESCE_SUPER		 85000U
+#define COALESCE_HIGH		250000U
+#define COALESCE_SLOW		524280U
 
 /* USB_WDT11_CTRL */
 #define TIMER11_EN		0x0001
@@ -607,6 +608,7 @@ struct r8152 {
 	u32 saved_wolopts;
 	u32 msg_enable;
 	u32 tx_qlen;
+	u32 coalesce;
 	u16 ocp_base;
 	u8 *intr_buff;
 	u8 version;
@@ -2143,28 +2145,19 @@ static int rtl8152_enable(struct r8152 *tp)
 	return rtl_enable(tp);
 }
 
-static void r8153_set_rx_agg(struct r8152 *tp)
+static void r8153_set_rx_early_timeout(struct r8152 *tp)
 {
-	u8 speed;
+	u32 ocp_data = tp->coalesce / 8;
 
-	speed = rtl8152_get_speed(tp);
-	if (speed & _1000bps) {
-		if (tp->udev->speed == USB_SPEED_SUPER) {
-			ocp_write_dword(tp, MCU_TYPE_USB, USB_RX_BUF_TH,
-					RX_THR_SUPPER);
-			ocp_write_dword(tp, MCU_TYPE_USB, USB_RX_EARLY_AGG,
-					EARLY_AGG_SUPPER);
-		} else {
-			ocp_write_dword(tp, MCU_TYPE_USB, USB_RX_BUF_TH,
-					RX_THR_HIGH);
-			ocp_write_dword(tp, MCU_TYPE_USB, USB_RX_EARLY_AGG,
-					EARLY_AGG_HIGH);
-		}
-	} else {
-		ocp_write_dword(tp, MCU_TYPE_USB, USB_RX_BUF_TH, RX_THR_SLOW);
-		ocp_write_dword(tp, MCU_TYPE_USB, USB_RX_EARLY_AGG,
-				EARLY_AGG_SLOW);
-	}
+	ocp_write_word(tp, MCU_TYPE_USB, USB_RX_EARLY_TIMEOUT, ocp_data);
+}
+
+static void r8153_set_rx_early_size(struct r8152 *tp)
+{
+	u32 mtu = tp->netdev->mtu;
+	u32 ocp_data = (agg_buf_sz - mtu - VLAN_ETH_HLEN - VLAN_HLEN) / 4;
+
+	ocp_write_word(tp, MCU_TYPE_USB, USB_RX_EARLY_SIZE, ocp_data);
 }
 
 static int rtl8153_enable(struct r8152 *tp)
@@ -2174,7 +2167,8 @@ static int rtl8153_enable(struct r8152 *tp)
 
 	set_tx_qlen(tp);
 	rtl_set_eee_plus(tp);
-	r8153_set_rx_agg(tp);
+	r8153_set_rx_early_timeout(tp);
+	r8153_set_rx_early_size(tp);
 
 	return rtl_enable(tp);
 }
@@ -3012,17 +3006,6 @@ static int rtl8152_open(struct net_device *netdev)
 
 	mutex_lock(&tp->control);
 
-	/* The WORK_ENABLE may be set when autoresume occurs */
-	if (test_bit(WORK_ENABLE, &tp->flags)) {
-		clear_bit(WORK_ENABLE, &tp->flags);
-		usb_kill_urb(tp->intr_urb);
-		cancel_delayed_work_sync(&tp->schedule);
-
-		/* disable the tx/rx, if the workqueue has enabled them. */
-		if (netif_carrier_ok(netdev))
-			tp->rtl_ops.disable(tp);
-	}
-
 	tp->rtl_ops.up(tp);
 
 	rtl8152_set_speed(tp, AUTONEG_ENABLE,
@@ -3068,12 +3051,6 @@ static int rtl8152_close(struct net_device *netdev)
 		rtl_stop_rx(tp);
 	} else {
 		mutex_lock(&tp->control);
-
-		/* The autosuspend may have been enabled and wouldn't
-		 * be disable when autoresume occurs, because the
-		 * netif_running() would be false.
-		 */
-		rtl_runtime_suspend_enable(tp, false);
 
 		tp->rtl_ops.down(tp);
 
@@ -3375,7 +3352,7 @@ static int rtl8152_resume(struct usb_interface *intf)
 		netif_device_attach(tp->netdev);
 	}
 
-	if (netif_running(tp->netdev)) {
+	if (netif_running(tp->netdev) && tp->netdev->flags & IFF_UP) {
 		if (test_bit(SELECTIVE_SUSPEND, &tp->flags)) {
 			rtl_runtime_suspend_enable(tp, false);
 			clear_bit(SELECTIVE_SUSPEND, &tp->flags);
@@ -3393,6 +3370,8 @@ static int rtl8152_resume(struct usb_interface *intf)
 		}
 		usb_submit_urb(tp->intr_urb, GFP_KERNEL);
 	} else if (test_bit(SELECTIVE_SUSPEND, &tp->flags)) {
+		if (tp->netdev->flags & IFF_UP)
+			rtl_runtime_suspend_enable(tp, false);
 		clear_bit(SELECTIVE_SUSPEND, &tp->flags);
 	}
 
@@ -3720,6 +3699,61 @@ out:
 	return ret;
 }
 
+static int rtl8152_get_coalesce(struct net_device *netdev,
+				struct ethtool_coalesce *coalesce)
+{
+	struct r8152 *tp = netdev_priv(netdev);
+
+	switch (tp->version) {
+	case RTL_VER_01:
+	case RTL_VER_02:
+		return -EOPNOTSUPP;
+	default:
+		break;
+	}
+
+	coalesce->rx_coalesce_usecs = tp->coalesce;
+
+	return 0;
+}
+
+static int rtl8152_set_coalesce(struct net_device *netdev,
+				struct ethtool_coalesce *coalesce)
+{
+	struct r8152 *tp = netdev_priv(netdev);
+	int ret;
+
+	switch (tp->version) {
+	case RTL_VER_01:
+	case RTL_VER_02:
+		return -EOPNOTSUPP;
+	default:
+		break;
+	}
+
+	if (coalesce->rx_coalesce_usecs > COALESCE_SLOW)
+		return -EINVAL;
+
+	ret = usb_autopm_get_interface(tp->intf);
+	if (ret < 0)
+		return ret;
+
+	mutex_lock(&tp->control);
+
+	if (tp->coalesce != coalesce->rx_coalesce_usecs) {
+		tp->coalesce = coalesce->rx_coalesce_usecs;
+
+		if (netif_running(tp->netdev) && netif_carrier_ok(netdev))
+			r8153_set_rx_early_timeout(tp);
+	}
+
+	mutex_unlock(&tp->control);
+
+	usb_autopm_put_interface(tp->intf);
+
+	return ret;
+}
+
 static struct ethtool_ops ops = {
 	.get_drvinfo = rtl8152_get_drvinfo,
 	.get_settings = rtl8152_get_settings,
@@ -3733,6 +3767,8 @@ static struct ethtool_ops ops = {
 	.get_strings = rtl8152_get_strings,
 	.get_sset_count = rtl8152_get_sset_count,
 	.get_ethtool_stats = rtl8152_get_ethtool_stats,
+	.get_coalesce = rtl8152_get_coalesce,
+	.set_coalesce = rtl8152_set_coalesce,
 	.get_eee = rtl_ethtool_get_eee,
 	.set_eee = rtl_ethtool_set_eee,
 };
@@ -3784,6 +3820,7 @@ out:
 static int rtl8152_change_mtu(struct net_device *dev, int new_mtu)
 {
 	struct r8152 *tp = netdev_priv(dev);
+	int ret;
 
 	switch (tp->version) {
 	case RTL_VER_01:
@@ -3796,9 +3833,22 @@ static int rtl8152_change_mtu(struct net_device *dev, int new_mtu)
 	if (new_mtu < 68 || new_mtu > RTL8153_MAX_MTU)
 		return -EINVAL;
 
+	ret = usb_autopm_get_interface(tp->intf);
+	if (ret < 0)
+		return ret;
+
+	mutex_lock(&tp->control);
+
 	dev->mtu = new_mtu;
 
-	return 0;
+	if (netif_running(dev) && netif_carrier_ok(dev))
+		r8153_set_rx_early_size(tp);
+
+	mutex_unlock(&tp->control);
+
+	usb_autopm_put_interface(tp->intf);
+
+	return ret;
 }
 
 static const struct net_device_ops rtl8152_netdev_ops = {
@@ -3967,6 +4017,18 @@ static int rtl8152_probe(struct usb_interface *intf,
 	tp->mii.reg_num_mask = 0x1f;
 	tp->mii.phy_id = R8152_PHY_ID;
 
+	switch (udev->speed) {
+	case USB_SPEED_SUPER:
+		tp->coalesce = COALESCE_SUPER;
+		break;
+	case USB_SPEED_HIGH:
+		tp->coalesce = COALESCE_HIGH;
+		break;
+	default:
+		tp->coalesce = COALESCE_SLOW;
+		break;
+	}
+
 	intf->needs_remote_wakeup = 1;
 
 	tp->rtl_ops.init(tp);
@@ -4039,6 +4101,7 @@ static struct usb_device_id rtl8152_table[] = {
 	{REALTEK_USB_DEVICE(VENDOR_ID_REALTEK, 0x8153)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_SAMSUNG, 0xa101)},
 	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x7205)},
+	{REALTEK_USB_DEVICE(VENDOR_ID_LENOVO,  0x304f)},
 	{}
 };
 

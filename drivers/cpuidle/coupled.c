@@ -176,14 +176,12 @@ void cpuidle_coupled_parallel_barrier(struct cpuidle_device *dev, atomic_t *a)
 
 /**
  * cpuidle_state_is_coupled - check if a state is part of a coupled set
- * @dev: struct cpuidle_device for the current cpu
  * @drv: struct cpuidle_driver for the platform
  * @state: index of the target state in drv->states
  *
  * Returns true if the target state is coupled with cpus besides this one
  */
-bool cpuidle_state_is_coupled(struct cpuidle_device *dev,
-	struct cpuidle_driver *drv, int state)
+bool cpuidle_state_is_coupled(struct cpuidle_driver *drv, int state)
 {
 	return drv->states[state].flags & CPUIDLE_FLAG_COUPLED;
 }
@@ -292,7 +290,7 @@ static inline int cpuidle_coupled_get_state(struct cpuidle_device *dev,
 	 */
 	smp_rmb();
 
-	for_each_cpu_mask(i, coupled->coupled_cpus)
+	for_each_cpu(i, &coupled->coupled_cpus)
 		if (cpu_online(i) && coupled->requested_state[i] < state)
 			state = coupled->requested_state[i];
 
@@ -338,7 +336,7 @@ static void cpuidle_coupled_poke_others(int this_cpu,
 {
 	int cpu;
 
-	for_each_cpu_mask(cpu, coupled->coupled_cpus)
+	for_each_cpu(cpu, &coupled->coupled_cpus)
 		if (cpu != this_cpu && cpu_online(cpu))
 			cpuidle_coupled_poke(cpu);
 }
@@ -638,7 +636,7 @@ int cpuidle_coupled_register_device(struct cpuidle_device *dev)
 	if (cpumask_empty(&dev->coupled_cpus))
 		return 0;
 
-	for_each_cpu_mask(cpu, dev->coupled_cpus) {
+	for_each_cpu(cpu, &dev->coupled_cpus) {
 		other_dev = per_cpu(cpuidle_devices, cpu);
 		if (other_dev && other_dev->coupled) {
 			coupled = other_dev->coupled;

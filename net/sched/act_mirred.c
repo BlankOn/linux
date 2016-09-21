@@ -157,7 +157,7 @@ static int tcf_mirred(struct sk_buff *skb, const struct tc_action *a,
 
 	if (!(at & AT_EGRESS)) {
 		if (m->tcfm_ok_push)
-			skb_push(skb2, skb2->dev->hard_header_len);
+			skb_push(skb2, skb->mac_len);
 	}
 
 	/* mirror is always swallowed */
@@ -166,6 +166,7 @@ static int tcf_mirred(struct sk_buff *skb, const struct tc_action *a,
 
 	skb2->skb_iif = skb->dev->ifindex;
 	skb2->dev = dev;
+	skb_sender_cpu_clear(skb2);
 	err = dev_queue_xmit(skb2);
 
 out:

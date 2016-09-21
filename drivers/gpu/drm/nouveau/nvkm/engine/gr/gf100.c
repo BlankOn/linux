@@ -236,7 +236,7 @@ static int
 gf100_gr_set_shader_exceptions(struct nvkm_object *object, u32 mthd,
 			       void *pdata, u32 size)
 {
-	struct gf100_gr_priv *priv = (void *)nv_engine(object);
+	struct gf100_gr_priv *priv = (void *)object->engine;
 	if (size >= sizeof(u32)) {
 		u32 data = *(u32 *)pdata ? 0xffffffff : 0x00000000;
 		nv_wr32(priv, 0x419e44, data);
@@ -260,8 +260,8 @@ gf100_gr_90c0_omthds[] = {
 
 struct nvkm_oclass
 gf100_gr_sclass[] = {
-	{ 0x902d, &nvkm_object_ofuncs },
-	{ 0x9039, &nvkm_object_ofuncs },
+	{ FERMI_TWOD_A, &nvkm_object_ofuncs },
+	{ FERMI_MEMORY_TO_MEMORY_FORMAT_A, &nvkm_object_ofuncs },
 	{ FERMI_A, &gf100_fermi_ofuncs, gf100_gr_9097_omthds },
 	{ FERMI_COMPUTE_A, &nvkm_object_ofuncs, gf100_gr_90c0_omthds },
 	{}
@@ -796,21 +796,41 @@ gf100_gr_trap_gpc_rop(struct gf100_gr_priv *priv, int gpc)
 }
 
 static const struct nvkm_enum gf100_mp_warp_error[] = {
-	{ 0x00, "NO_ERROR" },
-	{ 0x01, "STACK_MISMATCH" },
+	{ 0x01, "STACK_ERROR" },
+	{ 0x02, "API_STACK_ERROR" },
+	{ 0x03, "RET_EMPTY_STACK_ERROR" },
+	{ 0x04, "PC_WRAP" },
 	{ 0x05, "MISALIGNED_PC" },
-	{ 0x08, "MISALIGNED_GPR" },
-	{ 0x09, "INVALID_OPCODE" },
-	{ 0x0d, "GPR_OUT_OF_BOUNDS" },
-	{ 0x0e, "MEM_OUT_OF_BOUNDS" },
-	{ 0x0f, "UNALIGNED_MEM_ACCESS" },
-	{ 0x11, "INVALID_PARAM" },
+	{ 0x06, "PC_OVERFLOW" },
+	{ 0x07, "MISALIGNED_IMMC_ADDR" },
+	{ 0x08, "MISALIGNED_REG" },
+	{ 0x09, "ILLEGAL_INSTR_ENCODING" },
+	{ 0x0a, "ILLEGAL_SPH_INSTR_COMBO" },
+	{ 0x0b, "ILLEGAL_INSTR_PARAM" },
+	{ 0x0c, "INVALID_CONST_ADDR" },
+	{ 0x0d, "OOR_REG" },
+	{ 0x0e, "OOR_ADDR" },
+	{ 0x0f, "MISALIGNED_ADDR" },
+	{ 0x10, "INVALID_ADDR_SPACE" },
+	{ 0x11, "ILLEGAL_INSTR_PARAM2" },
+	{ 0x12, "INVALID_CONST_ADDR_LDC" },
+	{ 0x13, "GEOMETRY_SM_ERROR" },
+	{ 0x14, "DIVERGENT" },
+	{ 0x15, "WARP_EXIT" },
 	{}
 };
 
 static const struct nvkm_bitfield gf100_mp_global_error[] = {
+	{ 0x00000001, "SM_TO_SM_FAULT" },
+	{ 0x00000002, "L1_ERROR" },
 	{ 0x00000004, "MULTIPLE_WARP_ERRORS" },
-	{ 0x00000008, "OUT_OF_STACK_SPACE" },
+	{ 0x00000008, "PHYSICAL_STACK_OVERFLOW" },
+	{ 0x00000010, "BPT_INT" },
+	{ 0x00000020, "BPT_PAUSE" },
+	{ 0x00000040, "SINGLE_STEP_COMPLETE" },
+	{ 0x20000000, "ECC_SEC_ERROR" },
+	{ 0x40000000, "ECC_DED_ERROR" },
+	{ 0x80000000, "TIMEOUT" },
 	{}
 };
 
@@ -1097,11 +1117,25 @@ gf100_gr_intr(struct nvkm_subdev *subdev)
 	u32 subc = (addr & 0x00070000) >> 16;
 	u32 data = nv_rd32(priv, 0x400708);
 	u32 code = nv_rd32(priv, 0x400110);
-	u32 class = nv_rd32(priv, 0x404200 + (subc * 4));
+	u32 class;
 	int chid;
+
+	if (nv_device(priv)->card_type < NV_E0 || subc < 4)
+		class = nv_rd32(priv, 0x404200 + (subc * 4));
+	else
+		class = 0x0000;
 
 	engctx = nvkm_engctx_get(engine, inst);
 	chid   = pfifo->chid(pfifo, engctx);
+
+	if (stat & 0x00000001) {
+		/*
+		 * notifier interrupt, only needed for cyclestats
+		 * can be safely ignored
+		 */
+		nv_wr32(priv, 0x400100, 0x00000001);
+		stat &= ~0x00000001;
+	}
 
 	if (stat & 0x00000010) {
 		handle = nvkm_handle_get_class(engctx, class);

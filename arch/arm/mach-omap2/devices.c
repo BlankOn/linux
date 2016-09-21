@@ -74,82 +74,12 @@ omap_postcore_initcall(omap3_l3_init);
 static struct resource omap3isp_resources[] = {
 	{
 		.start		= OMAP3430_ISP_BASE,
-		.end		= OMAP3430_ISP_END,
+		.end		= OMAP3430_ISP_BASE + 0x12fc,
 		.flags		= IORESOURCE_MEM,
 	},
 	{
-		.start		= OMAP3430_ISP_CCP2_BASE,
-		.end		= OMAP3430_ISP_CCP2_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3430_ISP_CCDC_BASE,
-		.end		= OMAP3430_ISP_CCDC_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3430_ISP_HIST_BASE,
-		.end		= OMAP3430_ISP_HIST_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3430_ISP_H3A_BASE,
-		.end		= OMAP3430_ISP_H3A_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3430_ISP_PREV_BASE,
-		.end		= OMAP3430_ISP_PREV_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3430_ISP_RESZ_BASE,
-		.end		= OMAP3430_ISP_RESZ_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3430_ISP_SBL_BASE,
-		.end		= OMAP3430_ISP_SBL_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3430_ISP_CSI2A_REGS1_BASE,
-		.end		= OMAP3430_ISP_CSI2A_REGS1_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3430_ISP_CSIPHY2_BASE,
-		.end		= OMAP3430_ISP_CSIPHY2_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3630_ISP_CSI2A_REGS2_BASE,
-		.end		= OMAP3630_ISP_CSI2A_REGS2_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3630_ISP_CSI2C_REGS1_BASE,
-		.end		= OMAP3630_ISP_CSI2C_REGS1_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3630_ISP_CSIPHY1_BASE,
-		.end		= OMAP3630_ISP_CSIPHY1_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP3630_ISP_CSI2C_REGS2_BASE,
-		.end		= OMAP3630_ISP_CSI2C_REGS2_END,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP343X_CTRL_BASE + OMAP343X_CONTROL_CSIRXFE,
-		.end		= OMAP343X_CTRL_BASE + OMAP343X_CONTROL_CSIRXFE + 3,
-		.flags		= IORESOURCE_MEM,
-	},
-	{
-		.start		= OMAP343X_CTRL_BASE + OMAP3630_CONTROL_CAMERA_PHY_CTRL,
-		.end		= OMAP343X_CTRL_BASE + OMAP3630_CONTROL_CAMERA_PHY_CTRL + 3,
+		.start		= OMAP3430_ISP_BASE2,
+		.end		= OMAP3430_ISP_BASE2 + 0x0600,
 		.flags		= IORESOURCE_MEM,
 	},
 	{
@@ -165,17 +95,18 @@ static struct platform_device omap3isp_device = {
 	.resource	= omap3isp_resources,
 };
 
-static struct omap_iommu_arch_data omap3_isp_iommu = {
-	.name = "mmu_isp",
+static struct omap_iommu_arch_data omap3_isp_iommu[] = {
+	{ .name = "mmu_isp", },
+	{ .name = NULL, },
 };
 
 int omap3_init_camera(struct isp_platform_data *pdata)
 {
 	if (of_have_populated_dt())
-		omap3_isp_iommu.name = "480bd400.mmu";
+		omap3_isp_iommu[0].name = "480bd400.mmu";
 
 	omap3isp_device.dev.platform_data = pdata;
-	omap3isp_device.dev.archdata.iommu = &omap3_isp_iommu;
+	omap3isp_device.dev.archdata.iommu = omap3_isp_iommu;
 
 	return platform_device_register(&omap3isp_device);
 }

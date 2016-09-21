@@ -4,7 +4,6 @@
  */
 #include <linux/module.h>
 #include <linux/nfs_fs.h>
-#include <linux/nfs_idmap.h>
 #include <linux/nfs_mount.h>
 #include <linux/sunrpc/addr.h>
 #include <linux/sunrpc/auth.h>
@@ -15,6 +14,7 @@
 #include "callback.h"
 #include "delegation.h"
 #include "nfs4session.h"
+#include "nfs4idmap.h"
 #include "pnfs.h"
 #include "netns.h"
 
@@ -33,7 +33,7 @@ static int nfs_get_cb_ident_idr(struct nfs_client *clp, int minorversion)
 		return ret;
 	idr_preload(GFP_KERNEL);
 	spin_lock(&nn->nfs_client_lock);
-	ret = idr_alloc(&nn->cb_ident_idr, clp, 0, 0, GFP_NOWAIT);
+	ret = idr_alloc(&nn->cb_ident_idr, clp, 1, 0, GFP_NOWAIT);
 	if (ret >= 0)
 		clp->cl_cb_ident = ret;
 	spin_unlock(&nn->nfs_client_lock);
@@ -1130,7 +1130,7 @@ error:
  */
 static int nfs_probe_destination(struct nfs_server *server)
 {
-	struct inode *inode = server->super->s_root->d_inode;
+	struct inode *inode = d_inode(server->super->s_root);
 	struct nfs_fattr *fattr;
 	int error;
 

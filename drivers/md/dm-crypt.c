@@ -228,7 +228,7 @@ static struct crypto_ablkcipher *any_tfm(struct crypt_config *cc)
  *
  * tcw:  Compatible implementation of the block chaining mode used
  *       by the TrueCrypt device encryption system (prior to version 4.1).
- *       For more info see: http://www.truecrypt.org
+ *       For more info see: https://gitlab.com/cryptsetup/cryptsetup/wikis/TrueCryptOnDiskFormat
  *       It operates on full 512 byte sectors and uses CBC
  *       with an IV derived from initial key and the sector number.
  *       In addition, whitening value is applied on every sector, whitening
@@ -955,7 +955,8 @@ static void crypt_free_buffer_pages(struct crypt_config *cc, struct bio *clone);
 
 /*
  * Generate a new unfragmented bio with the given size
- * This should never violate the device limitations
+ * This should never violate the device limitations (but only because
+ * max_segment_size is being constrained to PAGE_SIZE).
  *
  * This function may be called concurrently. If we allocate from the mempool
  * concurrently, there is a possibility of deadlock. For example, if we have
@@ -1124,15 +1125,15 @@ static void clone_init(struct dm_crypt_io *io, struct bio *clone)
 static int kcryptd_io_read(struct dm_crypt_io *io, gfp_t gfp)
 {
 	struct crypt_config *cc = io->cc;
-	struct bio *base_bio = io->base_bio;
 	struct bio *clone;
 
 	/*
-	 * The block layer might modify the bvec array, so always
-	 * copy the required bvecs because we need the original
-	 * one in order to decrypt the whole bio data *afterwards*.
+	 * We need the original biovec array in order to decrypt
+	 * the whole bio data *afterwards* -- thanks to immutable
+	 * biovecs we don't need to worry about the block layer
+	 * modifying the biovec array; so leverage bio_clone_fast().
 	 */
-	clone = bio_clone_bioset(base_bio, gfp, cc->bs);
+	clone = bio_clone_fast(io->base_bio, gfp, cc->bs);
 	if (!clone)
 		return 1;
 
@@ -1816,6 +1817,7 @@ static int crypt_ctr(struct dm_target *ti, unsigned int argc, char **argv)
 		if (ret)
 			goto bad;
 
+		ret = -EINVAL;
 		while (opt_params--) {
 			opt_string = dm_shift_arg(&as);
 			if (!opt_string) {
@@ -2039,9 +2041,20 @@ static int crypt_iterate_devices(struct dm_target *ti,
 	return fn(ti, cc->dev, cc->start, ti->len, data);
 }
 
+static void crypt_io_hints(struct dm_target *ti, struct queue_limits *limits)
+{
+	/*
+	 * Unfortunate constraint that is required to avoid the potential
+	 * for exceeding underlying device's max_segments limits -- due to
+	 * crypt_alloc_buffer() possibly allocating pages for the encryption
+	 * bio that are not as physically contiguous as the original bio.
+	 */
+	limits->max_segment_size = PAGE_SIZE;
+}
+
 static struct target_type crypt_target = {
 	.name   = "crypt",
-	.version = {1, 14, 0},
+	.version = {1, 14, 1},
 	.module = THIS_MODULE,
 	.ctr    = crypt_ctr,
 	.dtr    = crypt_dtr,
@@ -2053,6 +2066,7 @@ static struct target_type crypt_target = {
 	.message = crypt_message,
 	.merge  = crypt_merge,
 	.iterate_devices = crypt_iterate_devices,
+	.io_hints = crypt_io_hints,
 };
 
 static int __init dm_crypt_init(void)

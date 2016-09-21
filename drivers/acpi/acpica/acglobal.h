@@ -112,7 +112,7 @@ ACPI_GLOBAL(u8, acpi_gbl_global_lock_pending);
  * interrupt level
  */
 ACPI_GLOBAL(acpi_spinlock, acpi_gbl_gpe_lock);	/* For GPE data structs and registers */
-ACPI_GLOBAL(acpi_spinlock, acpi_gbl_hardware_lock);	/* For ACPI H/W except GPE registers */
+ACPI_GLOBAL(acpi_raw_spinlock, acpi_gbl_hardware_lock);	/* For ACPI H/W except GPE registers */
 ACPI_GLOBAL(acpi_spinlock, acpi_gbl_reference_count_lock);
 
 /* Mutex for _OSI support */
@@ -306,6 +306,7 @@ ACPI_INIT_GLOBAL(u8, acpi_gbl_db_output_flags, ACPI_DB_CONSOLE_OUTPUT);
 ACPI_INIT_GLOBAL(u8, acpi_gbl_no_resource_disassembly, FALSE);
 ACPI_INIT_GLOBAL(u8, acpi_gbl_ignore_noop_operator, FALSE);
 ACPI_INIT_GLOBAL(u8, acpi_gbl_cstyle_disassembly, TRUE);
+ACPI_INIT_GLOBAL(u8, acpi_gbl_force_aml_disassembly, FALSE);
 
 ACPI_GLOBAL(u8, acpi_gbl_db_opt_disasm);
 ACPI_GLOBAL(u8, acpi_gbl_db_opt_verbose);
@@ -321,9 +322,7 @@ ACPI_INIT_GLOBAL(u8, acpi_gbl_db_terminate_threads, FALSE);
 ACPI_INIT_GLOBAL(u8, acpi_gbl_abort_method, FALSE);
 ACPI_INIT_GLOBAL(u8, acpi_gbl_method_executing, FALSE);
 
-ACPI_GLOBAL(u8, acpi_gbl_db_opt_tables);
-ACPI_GLOBAL(u8, acpi_gbl_db_opt_stats);
-ACPI_GLOBAL(u8, acpi_gbl_db_opt_ini_methods);
+ACPI_GLOBAL(u8, acpi_gbl_db_opt_no_ini_methods);
 ACPI_GLOBAL(u8, acpi_gbl_db_opt_no_region_support);
 ACPI_GLOBAL(u8, acpi_gbl_db_output_to_file);
 ACPI_GLOBAL(char *, acpi_gbl_db_buffer);

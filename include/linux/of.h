@@ -121,6 +121,8 @@ extern struct device_node *of_stdout;
 extern raw_spinlock_t devtree_lock;
 
 #ifdef CONFIG_OF
+void of_core_init(void);
+
 static inline bool is_of_node(struct fwnode_handle *fwnode)
 {
 	return fwnode && fwnode->type == FWNODE_OF;
@@ -305,6 +307,7 @@ extern int of_property_read_string_helper(struct device_node *np,
 extern int of_device_is_compatible(const struct device_node *device,
 				   const char *);
 extern bool of_device_is_available(const struct device_node *device);
+extern bool of_device_is_big_endian(const struct device_node *device);
 extern const void *of_get_property(const struct device_node *node,
 				const char *name,
 				int *lenp);
@@ -332,6 +335,7 @@ extern int of_count_phandle_with_args(const struct device_node *np,
 
 extern void of_alias_scan(void * (*dt_alloc)(u64 size, u64 align));
 extern int of_alias_get_id(struct device_node *np, const char *stem);
+extern int of_alias_get_highest_id(const char *stem);
 
 extern int of_machine_is_compatible(const char *compat);
 
@@ -373,6 +377,10 @@ const char *of_prop_next_string(struct property *prop, const char *cur);
 bool of_console_check(struct device_node *dn, char *name, int index);
 
 #else /* CONFIG_OF */
+
+static inline void of_core_init(void)
+{
+}
 
 static inline bool is_of_node(struct fwnode_handle *fwnode)
 {
@@ -462,6 +470,11 @@ static inline int of_device_is_compatible(const struct device_node *device,
 }
 
 static inline bool of_device_is_available(const struct device_node *device)
+{
+	return false;
+}
+
+static inline bool of_device_is_big_endian(const struct device_node *device)
 {
 	return false;
 }
@@ -594,6 +607,11 @@ static inline int of_alias_get_id(struct device_node *np, const char *stem)
 	return -ENOSYS;
 }
 
+static inline int of_alias_get_highest_id(const char *stem)
+{
+	return -ENOSYS;
+}
+
 static inline int of_machine_is_compatible(const char *compat)
 {
 	return 0;
@@ -616,6 +634,38 @@ static inline const char *of_prop_next_string(struct property *prop,
 	return NULL;
 }
 
+static inline int of_node_check_flag(struct device_node *n, unsigned long flag)
+{
+	return 0;
+}
+
+static inline int of_node_test_and_set_flag(struct device_node *n,
+					    unsigned long flag)
+{
+	return 0;
+}
+
+static inline void of_node_set_flag(struct device_node *n, unsigned long flag)
+{
+}
+
+static inline void of_node_clear_flag(struct device_node *n, unsigned long flag)
+{
+}
+
+static inline int of_property_check_flag(struct property *p, unsigned long flag)
+{
+	return 0;
+}
+
+static inline void of_property_set_flag(struct property *p, unsigned long flag)
+{
+}
+
+static inline void of_property_clear_flag(struct property *p, unsigned long flag)
+{
+}
+
 #define of_match_ptr(_ptr)	NULL
 #define of_match_node(_matches, _node)	NULL
 #endif /* CONFIG_OF */
@@ -623,7 +673,10 @@ static inline const char *of_prop_next_string(struct property *prop,
 #if defined(CONFIG_OF) && defined(CONFIG_NUMA)
 extern int of_node_to_nid(struct device_node *np);
 #else
-static inline int of_node_to_nid(struct device_node *device) { return 0; }
+static inline int of_node_to_nid(struct device_node *device)
+{
+	return NUMA_NO_NODE;
+}
 #endif
 
 static inline struct device_node *of_find_matching_node(
@@ -978,6 +1031,27 @@ static inline int of_changeset_update_property(struct of_changeset *ocs,
 {
 	return of_changeset_action(ocs, OF_RECONFIG_UPDATE_PROPERTY, np, prop);
 }
+
+struct device_node *of_changeset_create_device_nodev(
+	struct of_changeset *ocs, struct device_node *parent,
+	const char *fmt, va_list vargs);
+__printf(3, 4) struct device_node *of_changeset_create_device_node(
+	struct of_changeset *ocs, struct device_node *parent,
+	const char *fmt, ...);
+int of_changeset_add_property_copy(struct of_changeset *ocs,
+	struct device_node *np, const char *name,
+	const void *value, int length);
+int of_changeset_add_property_string(struct of_changeset *ocs,
+	struct device_node *np, const char *name, const char *str);
+__printf(4, 5) int of_changeset_add_property_stringf(struct of_changeset *ocs,
+		struct device_node *np, const char *name, const char *fmt, ...);
+int of_changeset_add_property_string_list(struct of_changeset *ocs,
+	struct device_node *np, const char *name, const char **strs, int count);
+int of_changeset_add_property_u32(struct of_changeset *ocs,
+	struct device_node *np, const char *name, u32 val);
+int of_changeset_add_property_bool(struct of_changeset *ocs,
+	struct device_node *np, const char *name);
+
 #else /* CONFIG_OF_DYNAMIC */
 static inline int of_reconfig_notifier_register(struct notifier_block *nb)
 {
@@ -994,6 +1068,58 @@ static inline int of_reconfig_notify(unsigned long action,
 }
 static inline int of_reconfig_get_state_change(unsigned long action,
 						struct of_reconfig_data *arg)
+{
+	return -EINVAL;
+}
+
+static inline int of_changeset_create_device_node(struct of_changeset *ocs,
+	struct device_node *parent, const char *fmt, ...)
+{
+	return -EINVAL;
+}
+
+int of_changeset_add_property_copy(struct of_changeset *ocs,
+	struct device_node *np, const char *name,
+	const void *value, int length)
+{
+	return -EINVAL;
+}
+
+int of_changeset_add_property_string(struct of_changeset *ocs,
+	struct device_node *np, const char *name, const char *str)
+{
+	return -EINVAL;
+}
+
+static inline struct device_node *of_changeset_create_device_nodev(
+	struct of_changeset *ocs, struct device_node *parent,
+	const char *fmt, va_list vargs)
+{
+	return ERR_PTR(-EINVAL);
+}
+
+static inline __printf(4, 5) struct device_node *
+	of_changeset_add_property_stringf(
+		struct of_changeset *ocs, struct device_node *np,
+		const char *name, const char *fmt, ...)
+{
+	return ERR_PTR(-EINVAL);
+}
+
+int of_changeset_add_property_string_list(struct of_changeset *ocs,
+	struct device_node *np, const char *name, const char **strs, int count)
+{
+	return -EINVAL;
+}
+
+int of_changeset_add_property_u32(struct of_changeset *ocs,
+	struct device_node *np, const char *name, u32 val)
+{
+	return -EINVAL;
+}
+
+int of_changeset_add_property_bool(struct of_changeset *ocs,
+	struct device_node *np, const char *name)
 {
 	return -EINVAL;
 }
@@ -1024,6 +1150,10 @@ int of_overlay_create(struct device_node *tree);
 int of_overlay_destroy(int id);
 int of_overlay_destroy_all(void);
 
+int of_overlay_create_indirect(struct device_node *tree, const char *id);
+int of_overlay_create_target_root(struct device_node *tree,
+		struct device_node *target_root);
+
 #else
 
 static inline int of_overlay_create(struct device_node *tree)
@@ -1037,6 +1167,18 @@ static inline int of_overlay_destroy(int id)
 }
 
 static inline int of_overlay_destroy_all(void)
+{
+	return -ENOTSUPP;
+}
+
+static inline int of_overlay_create_indirect(struct device_node *tree,
+		const char *id)
+{
+	return -ENOTSUPP;
+}
+
+static inline int of_overlay_create_target_root(struct device_node *tree,
+		struct device_node *target_root)
 {
 	return -ENOTSUPP;
 }

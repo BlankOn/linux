@@ -138,7 +138,7 @@ static struct osi_linux {
 	unsigned int	enable:1;
 	unsigned int	dmi:1;
 	unsigned int	cmdline:1;
-	unsigned int	default_disabling:1;
+	u8		default_disabling;
 } osi_linux = {0, 0, 0, 0};
 
 static u32 acpi_osi_handler(acpi_string interface, u32 supported)
@@ -214,7 +214,7 @@ static int __init acpi_reserve_resources(void)
 
 	return 0;
 }
-device_initcall(acpi_reserve_resources);
+fs_initcall_sync(acpi_reserve_resources);
 
 void acpi_os_printf(const char *fmt, ...)
 {
@@ -336,11 +336,11 @@ acpi_map_lookup_virt(void __iomem *virt, acpi_size size)
 	return NULL;
 }
 
-#ifndef CONFIG_IA64
-#define should_use_kmap(pfn)   page_is_ram(pfn)
-#else
+#if defined(CONFIG_IA64) || defined(CONFIG_ARM64)
 /* ioremap will take care of cache attributes */
 #define should_use_kmap(pfn)   0
+#else
+#define should_use_kmap(pfn)   page_is_ram(pfn)
 #endif
 
 static void __iomem *acpi_map(acpi_physical_address pg_off, unsigned long pg_sz)
@@ -1452,10 +1452,13 @@ void __init acpi_osi_setup(char *str)
 	if (*str == '!') {
 		str++;
 		if (*str == '\0') {
-			osi_linux.default_disabling = 1;
+			/* Do not override acpi_osi=!* */
+			if (!osi_linux.default_disabling)
+				osi_linux.default_disabling =
+					ACPI_DISABLE_ALL_VENDOR_STRINGS;
 			return;
 		} else if (*str == '*') {
-			acpi_update_interfaces(ACPI_DISABLE_ALL_STRINGS);
+			osi_linux.default_disabling = ACPI_DISABLE_ALL_STRINGS;
 			for (i = 0; i < OSI_STRING_ENTRIES_MAX; i++) {
 				osi = &osi_setup_entries[i];
 				osi->enable = false;
@@ -1528,10 +1531,13 @@ static void __init acpi_osi_setup_late(void)
 	acpi_status status;
 
 	if (osi_linux.default_disabling) {
-		status = acpi_update_interfaces(ACPI_DISABLE_ALL_VENDOR_STRINGS);
+		status = acpi_update_interfaces(osi_linux.default_disabling);
 
 		if (ACPI_SUCCESS(status))
-			printk(KERN_INFO PREFIX "Disabled all _OSI OS vendors\n");
+			printk(KERN_INFO PREFIX "Disabled all _OSI OS vendors%s\n",
+				osi_linux.default_disabling ==
+				ACPI_DISABLE_ALL_STRINGS ?
+				" and feature groups" : "");
 	}
 
 	for (i = 0; i < OSI_STRING_ENTRIES_MAX; i++) {

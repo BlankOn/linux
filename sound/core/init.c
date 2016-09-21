@@ -58,6 +58,10 @@ static char *slots[SNDRV_CARDS];
 module_param_array(slots, charp, NULL, 0444);
 MODULE_PARM_DESC(slots, "Module names assigned to the slots.");
 
+static bool slots_reserved[SNDRV_CARDS];
+module_param_array(slots_reserved, bool, NULL, 0444);
+MODULE_PARM_DESC(slots_reserved, "Slots which are excluded from automatic assignment");
+
 /* return non-zero if the given index is reserved for the given
  * module via slots option
  */
@@ -149,7 +153,7 @@ static int get_slot_from_bitmask(int mask, int (*check)(struct module *, int),
 	for (slot = 0; slot < SNDRV_CARDS; slot++) {
 		if (slot < 32 && !(mask & (1U << slot)))
 			continue;
-		if (!test_bit(slot, snd_cards_lock)) {
+		if (!test_bit(slot, snd_cards_lock) && !slots_reserved[slot]) {
 			if (check(module, slot))
 				return slot; /* found */
 		}
@@ -400,7 +404,6 @@ static const struct file_operations snd_shutdown_f_ops =
 int snd_card_disconnect(struct snd_card *card)
 {
 	struct snd_monitor_file *mfile;
-	int err;
 
 	if (!card)
 		return -EINVAL;
@@ -445,9 +448,7 @@ int snd_card_disconnect(struct snd_card *card)
 #endif
 
 	/* notify all devices that we are disconnected */
-	err = snd_device_disconnect_all(card);
-	if (err < 0)
-		dev_err(card->dev, "not all devices for card %i can be disconnected\n", card->number);
+	snd_device_disconnect_all(card);
 
 	snd_info_card_disconnect(card);
 	if (card->registered) {

@@ -95,6 +95,12 @@
 #define CRYPTO_ALG_KERN_DRIVER_ONLY	0x00001000
 
 /*
+ * Mark a cipher as a service implementation only usable by another
+ * cipher and never by a normal user of the kernel crypto API
+ */
+#define CRYPTO_ALG_INTERNAL		0x00002000
+
+/*
  * Transform masks and values (for crt_flags).
  */
 #define CRYPTO_TFM_REQ_MASK		0x000fff00
@@ -1452,6 +1458,12 @@ static inline void aead_request_set_tfm(struct aead_request *req,
 					struct crypto_aead *tfm)
 {
 	req->base.tfm = crypto_aead_tfm(crypto_aead_crt(tfm)->base);
+}
+
+static inline struct aead_request *aead_request_cast(
+					struct crypto_async_request *req)
+{
+	return container_of(req, struct aead_request, base);
 }
 
 /**

@@ -156,6 +156,7 @@ ENTRY(cpu_do_resume)
 	msr	cpacr_el1, x6
 	msr	ttbr0_el1, x1
 	msr	ttbr1_el1, x7
+	tcr_set_idmap_t0sz x8, x7
 	msr	tcr_el1, x8
 	msr	vbar_el1, x9
 	msr	mdscr_el1, x10
@@ -164,6 +165,7 @@ ENTRY(cpu_do_resume)
 	 */
 	ubfx	x11, x11, #1, #1
 	msr	oslar_el1, x11
+	reset_pmuserenr_el0 x0			// Disable PMU access from EL0
 	mov	x0, x12
 	dsb	nsh		// Make sure local tlb invalidation completed
 	isb
@@ -201,7 +203,9 @@ ENTRY(__cpu_setup)
 
 	mov	x0, #3 << 20
 	msr	cpacr_el1, x0			// Enable FP/ASIMD
-	msr	mdscr_el1, xzr			// Reset mdscr_el1
+	mov	x0, #1 << 12			// Reset mdscr_el1 and disable
+	msr	mdscr_el1, x0			// access to the DCC from EL0
+	reset_pmuserenr_el0 x0			// Disable PMU access from EL0
 	/*
 	 * Memory region attributes for LPAE:
 	 *
@@ -233,6 +237,8 @@ ENTRY(__cpu_setup)
 	 */
 	ldr	x10, =TCR_TxSZ(VA_BITS) | TCR_CACHE_FLAGS | TCR_SMP_FLAGS | \
 			TCR_TG_FLAGS | TCR_ASID16 | TCR_TBI0
+	tcr_set_idmap_t0sz	x10, x9
+
 	/*
 	 * Read the PARange bits from ID_AA64MMFR0_EL1 and set the IPS bits in
 	 * TCR_EL1.

@@ -1561,6 +1561,9 @@ int kvm_vgic_inject_irq(struct kvm *kvm, int cpuid, unsigned int irq_num,
 			goto out;
 	}
 
+	if (irq_num >= min(kvm->arch.vgic.nr_irqs, 1020))
+		return -EINVAL;
+
 	vcpu_id = vgic_update_irq_pending(kvm, cpuid, irq_num, level);
 	if (vcpu_id >= 0) {
 		/* kick the specified vcpu */
@@ -1599,8 +1602,8 @@ void kvm_vgic_vcpu_destroy(struct kvm_vcpu *vcpu)
 static int vgic_vcpu_init_maps(struct kvm_vcpu *vcpu, int nr_irqs)
 {
 	struct vgic_cpu *vgic_cpu = &vcpu->arch.vgic_cpu;
-
-	int sz = (nr_irqs - VGIC_NR_PRIVATE_IRQS) / 8;
+	int nr_longs = BITS_TO_LONGS(nr_irqs - VGIC_NR_PRIVATE_IRQS);
+	int sz = nr_longs * sizeof(unsigned long);
 	vgic_cpu->pending_shared = kzalloc(sz, GFP_KERNEL);
 	vgic_cpu->active_shared = kzalloc(sz, GFP_KERNEL);
 	vgic_cpu->pend_act_shared = kzalloc(sz, GFP_KERNEL);
@@ -2141,7 +2144,7 @@ int kvm_irq_map_gsi(struct kvm *kvm,
 		    struct kvm_kernel_irq_routing_entry *entries,
 		    int gsi)
 {
-	return gsi;
+	return 0;
 }
 
 int kvm_irq_map_chip_pin(struct kvm *kvm, unsigned irqchip, unsigned pin)
@@ -2158,10 +2161,7 @@ int kvm_set_irq(struct kvm *kvm, int irq_source_id,
 
 	BUG_ON(!vgic_initialized(kvm));
 
-	if (spi > kvm->arch.vgic.nr_irqs)
-		return -EINVAL;
 	return kvm_vgic_inject_irq(kvm, 0, spi, level);
-
 }
 
 /* MSI not implemented yet */

@@ -60,10 +60,11 @@ config LOCKDEP_SUPPORT
 
 config RWSEM_GENERIC_SPINLOCK
 	bool
+	default y if PREEMPT_RT_FULL
 
 config RWSEM_XCHGADD_ALGORITHM
 	bool
-	default y
+	default y if !PREEMPT_RT_FULL
 
 config GENERIC_LOCKBREAK
 	bool
@@ -88,7 +89,7 @@ config PPC
 	select ARCH_MIGHT_HAVE_PC_PARPORT
 	select ARCH_MIGHT_HAVE_PC_SERIO
 	select BINFMT_ELF
-	select ARCH_BINFMT_ELF_RANDOMIZE_PIE
+	select ARCH_HAS_ELF_RANDOMIZE
 	select OF
 	select OF_EARLY_FLATTREE
 	select OF_RESERVED_MEM
@@ -126,7 +127,7 @@ config PPC
 	select IRQ_FORCED_THREADING
 	select HAVE_RCU_TABLE_FREE if SMP
 	select HAVE_SYSCALL_TRACEPOINTS
-	select HAVE_BPF_JIT if PPC64
+	select HAVE_BPF_JIT
 	select HAVE_ARCH_JUMP_LABEL
 	select ARCH_HAVE_NMI_SAFE_CMPXCHG
 	select ARCH_HAS_GCOV_PROFILE_ALL
@@ -138,6 +139,7 @@ config PPC
 	select ARCH_HAS_TICK_BROADCAST if GENERIC_CLOCKEVENTS_BROADCAST
 	select GENERIC_STRNCPY_FROM_USER
 	select GENERIC_STRNLEN_USER
+	select HAVE_PREEMPT_LAZY
 	select HAVE_MOD_ARCH_SPECIFIC
 	select MODULES_USE_ELF_RELA
 	select CLONE_BACKWARDS
@@ -152,6 +154,7 @@ config PPC
 	select DCACHE_WORD_ACCESS if PPC64 && CPU_LITTLE_ENDIAN
 	select NO_BOOTMEM
 	select HAVE_GENERIC_RCU_GUP
+	select HAVE_PERF_EVENTS_NMI if PPC64
 
 config GENERIC_CSUM
 	def_bool CPU_LITTLE_ENDIAN
@@ -188,9 +191,6 @@ config SCHED_OMIT_FRAME_POINTER
 config ARCH_MAY_HAVE_PC_FDC
 	bool
 	default PCI
-
-config PPC_OF
-	def_bool y
 
 config PPC_UDBG_16550
 	bool
@@ -297,6 +297,12 @@ config ZONE_DMA32
 	bool
 	default y if PPC64
 
+config PGTABLE_LEVELS
+	int
+	default 2 if !PPC64
+	default 3 if PPC_64K_PAGES
+	default 4
+
 source "init/Kconfig"
 
 source "kernel/Kconfig.freezer"
@@ -308,7 +314,7 @@ menu "Kernel options"
 
 config HIGHMEM
 	bool "High memory support"
-	depends on PPC32
+	depends on PPC32 && !PREEMPT_RT_FULL
 
 source kernel/Kconfig.hz
 source kernel/Kconfig.preempt

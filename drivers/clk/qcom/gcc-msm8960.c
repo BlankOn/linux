@@ -113,14 +113,16 @@ static struct clk_regmap pll14_vote = {
 	},
 };
 
-#define P_PXO	0
-#define P_PLL8	1
-#define P_PLL3	2
-#define P_CXO	2
+enum {
+	P_PXO,
+	P_PLL8,
+	P_PLL3,
+	P_CXO,
+};
 
-static const u8 gcc_pxo_pll8_map[] = {
-	[P_PXO]		= 0,
-	[P_PLL8]	= 3,
+static const struct parent_map gcc_pxo_pll8_map[] = {
+	{ P_PXO, 0 },
+	{ P_PLL8, 3 }
 };
 
 static const char *gcc_pxo_pll8[] = {
@@ -128,10 +130,10 @@ static const char *gcc_pxo_pll8[] = {
 	"pll8_vote",
 };
 
-static const u8 gcc_pxo_pll8_cxo_map[] = {
-	[P_PXO]		= 0,
-	[P_PLL8]	= 3,
-	[P_CXO]		= 5,
+static const struct parent_map gcc_pxo_pll8_cxo_map[] = {
+	{ P_PXO, 0 },
+	{ P_PLL8, 3 },
+	{ P_CXO, 5 }
 };
 
 static const char *gcc_pxo_pll8_cxo[] = {
@@ -140,10 +142,10 @@ static const char *gcc_pxo_pll8_cxo[] = {
 	"cxo",
 };
 
-static const u8 gcc_pxo_pll8_pll3_map[] = {
-	[P_PXO]		= 0,
-	[P_PLL8]	= 3,
-	[P_PLL3]	= 6,
+static const struct parent_map gcc_pxo_pll8_pll3_map[] = {
+	{ P_PXO, 0 },
+	{ P_PLL8, 3 },
+	{ P_PLL3, 6 }
 };
 
 static const char *gcc_pxo_pll8_pll3[] = {
@@ -2751,7 +2753,7 @@ static struct clk_rcg ce3_src = {
 	},
 	.freq_tbl = clk_tbl_ce3,
 	.clkr = {
-		.enable_reg = 0x2c08,
+		.enable_reg = 0x36c0,
 		.enable_mask = BIT(7),
 		.hw.init = &(struct clk_init_data){
 			.name = "ce3_src",
@@ -2767,7 +2769,7 @@ static struct clk_branch ce3_core_clk = {
 	.halt_reg = 0x2fdc,
 	.halt_bit = 5,
 	.clkr = {
-		.enable_reg = 0x36c4,
+		.enable_reg = 0x36cc,
 		.enable_mask = BIT(4),
 		.hw.init = &(struct clk_init_data){
 			.name = "ce3_core_clk",

@@ -1845,10 +1845,10 @@ static int team_vlan_rx_kill_vid(struct net_device *dev, __be16 proto, u16 vid)
 	struct team *team = netdev_priv(dev);
 	struct team_port *port;
 
-	rcu_read_lock();
-	list_for_each_entry_rcu(port, &team->port_list, list)
+	mutex_lock(&team->lock);
+	list_for_each_entry(port, &team->port_list, list)
 		vlan_vid_del(port->dev, proto, vid);
-	rcu_read_unlock();
+	mutex_unlock(&team->lock);
 
 	return 0;
 }
@@ -1935,6 +1935,9 @@ static netdev_features_t team_fix_features(struct net_device *dev,
 						     mask);
 	}
 	rcu_read_unlock();
+
+	features = netdev_add_tso_features(features, mask);
+
 	return features;
 }
 
@@ -1976,6 +1979,7 @@ static const struct net_device_ops team_netdev_ops = {
 	.ndo_change_carrier     = team_change_carrier,
 	.ndo_bridge_setlink     = ndo_dflt_netdev_switch_port_bridge_setlink,
 	.ndo_bridge_dellink     = ndo_dflt_netdev_switch_port_bridge_dellink,
+	.ndo_features_check	= passthru_features_check,
 };
 
 /***********************

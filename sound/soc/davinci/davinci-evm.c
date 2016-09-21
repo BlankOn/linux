@@ -20,6 +20,7 @@
 #include <sound/core.h>
 #include <sound/pcm.h>
 #include <sound/soc.h>
+#include <sound/pcm_params.h>
 
 #include <asm/dma.h>
 #include <asm/mach-types.h>
@@ -31,15 +32,16 @@ struct snd_soc_card_drvdata_davinci {
 
 static int evm_startup(struct snd_pcm_substream *substream)
 {
+	int ret = 0;
 	struct snd_soc_pcm_runtime *rtd = substream->private_data;
 	struct snd_soc_card *soc_card = rtd->card;
 	struct snd_soc_card_drvdata_davinci *drvdata =
 		snd_soc_card_get_drvdata(soc_card);
 
 	if (drvdata->mclk)
-		return clk_prepare_enable(drvdata->mclk);
+		ret = clk_prepare_enable(drvdata->mclk);
 
-	return 0;
+	return ret;
 }
 
 static void evm_shutdown(struct snd_pcm_substream *substream)
@@ -76,11 +78,112 @@ static int evm_hw_params(struct snd_pcm_substream *substream,
 
 	return 0;
 }
+static int wilink8_bt_hw_params(struct snd_pcm_substream *substream,
+				 struct snd_pcm_hw_params *params)
+{
+	struct snd_soc_pcm_runtime *rtd = substream->private_data;
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct snd_soc_codec *codec = rtd->codec;
+	struct snd_soc_card *soc_card = rtd->card;
+	struct platform_device *pdev = to_platform_device(soc_card->dev);
+	unsigned sysclk = ((struct snd_soc_card_drvdata_davinci *)
+			   snd_soc_card_get_drvdata(soc_card))->sysclk;
+	int ret = 0;
+	int rate = params_rate(params);
+
+	if (rate == 16000) {
+		/*
+		 * Works with tdm-slots set to 5 in the DT:
+		 * 5 slots each with a word-length of 20 gives us 100
+		 * bits/frame.
+		 */
+		/* MCLK divider 24/3=8MHz */
+		ret = snd_soc_dai_set_clkdiv(cpu_dai, 0, 3);
+		/* BCLK divider 8/5=1.6MHz */
+		ret = snd_soc_dai_set_clkdiv(cpu_dai, 1, 5);
+		/* BCLK/FS ratio 1.6/100=16kHz FS */
+		ret = snd_soc_dai_set_clkdiv(cpu_dai, 2, 100);
+
+		/*
+		 * Works with tdm-slots set to 2 in the DT:
+		 * 2 slots each with a word-length of 30 gives us 60
+		 * bits/frame.
+		 *
+		 * ret = snd_soc_dai_set_clkdiv(cpu_dai, 0, 3);
+		 * ret = snd_soc_dai_set_clkdiv(cpu_dai, 1, 5);
+		 * ret = snd_soc_dai_set_clkdiv(cpu_dai, 2, 100);
+		 */
+	}
+	else if (rate == 8000) {
+                /*
+                * Works with tdm-slots set to 5 in the DT:
+                * 5 slots each with a word-length of 20 gives us 100
+                * bits/frame.
+                */
+                /* MCLK divider 24/3=8MHz */
+                ret = snd_soc_dai_set_clkdiv(cpu_dai, 0, 3);
+                /* BCLK divider 8/10=800kHz */
+                ret = snd_soc_dai_set_clkdiv(cpu_dai, 1, 10);
+                /* BCLK/FS ratio 800/100=8kHz FS */
+                ret = snd_soc_dai_set_clkdiv(cpu_dai, 2, 100);
+	}
+	else if (rate == 48000) {
+		/*
+		 * Works with tdm-slots set to 5 in the DT:
+		 * 5 slots each with a word-length of 20 gives us 100
+		 * bits/frame.
+		 */
+		/* MCLK divider 24/1=24MHz */
+		ret = snd_soc_dai_set_clkdiv(cpu_dai, 0, 1);
+		/* BCLK divider 24/5=4.8MHz */
+		ret = snd_soc_dai_set_clkdiv(cpu_dai, 1, 5);
+		/* BCLK/FS ratio 4.8/100=48kHz FS */
+		ret = snd_soc_dai_set_clkdiv(cpu_dai, 2, 100);
+	} else {
+		dev_err(&pdev->dev, "Unsupported rate\n");
+	}
+
+	if (ret < 0) {
+		dev_err(&pdev->dev, "can't set CPU DAI clock divider %d\n",
+			ret);
+		return ret;
+	}
+
+	ret = snd_soc_dai_set_sysclk(cpu_dai, 0, sysclk, SND_SOC_CLOCK_OUT);
+
+	return ret;
+}
+
+/* If changing sample format the tda998x configuration (REG_CTS_N) needs
+   to be changed. */
+#define TDA998X_SAMPLE_FORMAT SNDRV_PCM_FORMAT_S32_LE
+static int evm_tda998x_startup(struct snd_pcm_substream *substream)
+{
+	struct snd_pcm_runtime *runtime = substream->runtime;
+	struct snd_mask *fmt = constrs_mask(&runtime->hw_constraints,
+					    SNDRV_PCM_HW_PARAM_FORMAT);
+
+	snd_mask_none(fmt);
+	snd_mask_set(fmt, TDA998X_SAMPLE_FORMAT);
+
+	return evm_startup(substream);
+}
 
 static struct snd_soc_ops evm_ops = {
 	.startup = evm_startup,
 	.shutdown = evm_shutdown,
 	.hw_params = evm_hw_params,
+};
+
+
+static struct snd_soc_ops evm_tda998x_ops = {
+	.startup = evm_tda998x_startup,
+	.shutdown = evm_shutdown,
+};
+static struct snd_soc_ops wilink8_bt_ops = {
+	.startup = evm_startup,
+	.shutdown = evm_shutdown,
+	.hw_params = wilink8_bt_hw_params,
 };
 
 /* davinci-evm machine dapm widgets */
@@ -117,7 +220,6 @@ static const struct snd_soc_dapm_route audio_map[] = {
 static int evm_aic3x_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_card *card = rtd->card;
-	struct snd_soc_codec *codec = rtd->codec;
 	struct device_node *np = card->dev->of_node;
 	int ret;
 
@@ -136,9 +238,45 @@ static int evm_aic3x_init(struct snd_soc_pcm_runtime *rtd)
 	}
 
 	/* not connected */
-	snd_soc_dapm_nc_pin(&codec->dapm, "MONO_LOUT");
-	snd_soc_dapm_nc_pin(&codec->dapm, "HPLCOM");
-	snd_soc_dapm_nc_pin(&codec->dapm, "HPRCOM");
+	snd_soc_dapm_nc_pin(&card->dapm, "MONO_LOUT");
+	snd_soc_dapm_nc_pin(&card->dapm, "HPLCOM");
+	snd_soc_dapm_nc_pin(&card->dapm, "HPRCOM");
+
+	return 0;
+}
+
+static const struct snd_soc_dapm_widget tda998x_dapm_widgets[] = {
+	SND_SOC_DAPM_OUTPUT("HDMI Out"),
+};
+
+static int evm_tda998x_init(struct snd_soc_pcm_runtime *rtd)
+{
+	struct snd_soc_dai *cpu_dai = rtd->cpu_dai;
+	struct snd_soc_dapm_context *dapm = &rtd->codec->dapm;
+	struct snd_soc_card *soc_card = rtd->card;
+	struct snd_soc_card_drvdata_davinci *drvdata =
+		snd_soc_card_get_drvdata(soc_card);
+	int ret;
+
+	ret = snd_soc_dai_set_clkdiv(cpu_dai, 0, 1);
+	if (ret < 0)
+		return ret;
+
+	ret = snd_soc_dai_set_sysclk(cpu_dai, 0, drvdata->sysclk,
+				     SND_SOC_CLOCK_IN);
+	if (ret < 0)
+		return ret;
+
+	snd_soc_dapm_new_controls(dapm, tda998x_dapm_widgets,
+				  ARRAY_SIZE(tda998x_dapm_widgets));
+
+	ret = snd_soc_of_parse_audio_routing(soc_card, "ti,audio-routing");
+
+	/* not connected */
+	snd_soc_dapm_disable_pin(dapm, "RX");
+
+	/* always connected */
+	snd_soc_dapm_enable_pin(dapm, "HDMI Out");
 
 	return 0;
 }
@@ -328,7 +466,7 @@ static struct snd_soc_card da850_snd_soc_card = {
 #if defined(CONFIG_OF)
 
 /*
- * The struct is used as place holder. It will be completely
+ * The structs are used as place holders. They will be completely
  * filled with data from dt node.
  */
 static struct snd_soc_dai_link evm_dai_tlv320aic3x = {
@@ -341,10 +479,36 @@ static struct snd_soc_dai_link evm_dai_tlv320aic3x = {
 		   SND_SOC_DAIFMT_IB_NF,
 };
 
+static struct snd_soc_dai_link evm_dai_tda998x_hdmi = {
+	.name		= "NXP TDA998x HDMI Chip",
+	.stream_name	= "HDMI",
+	.codec_dai_name	= "hdmi-hifi",
+	.ops		= &evm_tda998x_ops,
+	.init           = evm_tda998x_init,
+	.dai_fmt	= (SND_SOC_DAIFMT_CBS_CFS | SND_SOC_DAIFMT_I2S |
+			   SND_SOC_DAIFMT_IB_NF),
+};
+static struct snd_soc_dai_link evm_dai_wilink8_bt = {
+	.name		= "WILINK8_BT",
+	.stream_name	= "WILINK8",
+	.codec_dai_name	= "wilink8_bt-hifi",
+	.ops            = &wilink8_bt_ops,
+	.dai_fmt = (SND_SOC_DAIFMT_CBS_CFS | SND_SOC_DAIFMT_NB_IF |
+			SND_SOC_DAIFMT_DSP_A),
+};
+
 static const struct of_device_id davinci_evm_dt_ids[] = {
 	{
 		.compatible = "ti,da830-evm-audio",
-		.data = (void *) &evm_dai_tlv320aic3x,
+		.data = &evm_dai_tlv320aic3x,
+	},
+	{
+		.compatible = "ti,beaglebone-black-audio",
+		.data = &evm_dai_tda998x_hdmi,
+	},
+	{
+		.compatible = "ti,wilink8-bt-audio",
+		.data = &evm_dai_wilink8_bt,
 	},
 	{ /* sentinel */ }
 };
@@ -425,18 +589,8 @@ static int davinci_evm_probe(struct platform_device *pdev)
 	return ret;
 }
 
-static int davinci_evm_remove(struct platform_device *pdev)
-{
-	struct snd_soc_card *card = platform_get_drvdata(pdev);
-
-	snd_soc_unregister_card(card);
-
-	return 0;
-}
-
 static struct platform_driver davinci_evm_driver = {
 	.probe		= davinci_evm_probe,
-	.remove		= davinci_evm_remove,
 	.driver		= {
 		.name	= "davinci_evm",
 		.pm	= &snd_soc_pm_ops,

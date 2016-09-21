@@ -82,7 +82,7 @@ static const struct proto_ops macvtap_socket_ops;
 #define TUN_OFFLOADS (NETIF_F_HW_CSUM | NETIF_F_TSO_ECN | NETIF_F_TSO | \
 		      NETIF_F_TSO6 | NETIF_F_UFO)
 #define RX_OFFLOADS (NETIF_F_GRO | NETIF_F_LRO)
-#define TAP_FEATURES (NETIF_F_GSO | NETIF_F_SG)
+#define TAP_FEATURES (NETIF_F_GSO | NETIF_F_SG | NETIF_F_FRAGLIST)
 
 static struct macvlan_dev *macvtap_get_vlan_rcu(const struct net_device *dev)
 {
@@ -313,7 +313,7 @@ static rx_handler_result_t macvtap_handle_frame(struct sk_buff **pskb)
 	 */
 	if (q->flags & IFF_VNET_HDR)
 		features |= vlan->tap_features;
-	if (netif_needs_gso(dev, skb, features)) {
+	if (netif_needs_gso(skb, features)) {
 		struct sk_buff *segs = __skb_gso_segment(skb, features, false);
 
 		if (IS_ERR(segs))
@@ -710,6 +710,8 @@ static ssize_t macvtap_get_user(struct macvtap_queue *q, struct msghdr *m,
 			macvtap16_to_cpu(q, vnet_hdr.hdr_len) : GOODCOPY_LEN;
 		if (copylen > good_linear)
 			copylen = good_linear;
+		else if (copylen < ETH_HLEN)
+			copylen = ETH_HLEN;
 		linear = copylen;
 		i = *from;
 		iov_iter_advance(&i, copylen);
@@ -719,10 +721,11 @@ static ssize_t macvtap_get_user(struct macvtap_queue *q, struct msghdr *m,
 
 	if (!zerocopy) {
 		copylen = len;
-		if (macvtap16_to_cpu(q, vnet_hdr.hdr_len) > good_linear)
+		linear = macvtap16_to_cpu(q, vnet_hdr.hdr_len);
+		if (linear > good_linear)
 			linear = good_linear;
-		else
-			linear = macvtap16_to_cpu(q, vnet_hdr.hdr_len);
+		else if (linear < ETH_HLEN)
+			linear = ETH_HLEN;
 	}
 
 	skb = macvtap_alloc_skb(&q->sk, MACVTAP_RESERVE, copylen,
@@ -1054,10 +1057,10 @@ static long macvtap_ioctl(struct file *file, unsigned int cmd,
 		return 0;
 
 	case TUNSETSNDBUF:
-		if (get_user(u, up))
+		if (get_user(s, sp))
 			return -EFAULT;
 
-		q->sk.sk_sndbuf = u;
+		q->sk.sk_sndbuf = s;
 		return 0;
 
 	case TUNGETVNETHDRSZ:
@@ -1118,8 +1121,6 @@ static const struct file_operations macvtap_fops = {
 	.owner		= THIS_MODULE,
 	.open		= macvtap_open,
 	.release	= macvtap_release,
-	.read		= new_sync_read,
-	.write		= new_sync_write,
 	.read_iter	= macvtap_read_iter,
 	.write_iter	= macvtap_write_iter,
 	.poll		= macvtap_poll,
@@ -1130,16 +1131,15 @@ static const struct file_operations macvtap_fops = {
 #endif
 };
 
-static int macvtap_sendmsg(struct kiocb *iocb, struct socket *sock,
-			   struct msghdr *m, size_t total_len)
+static int macvtap_sendmsg(struct socket *sock, struct msghdr *m,
+			   size_t total_len)
 {
 	struct macvtap_queue *q = container_of(sock, struct macvtap_queue, sock);
 	return macvtap_get_user(q, m, &m->msg_iter, m->msg_flags & MSG_DONTWAIT);
 }
 
-static int macvtap_recvmsg(struct kiocb *iocb, struct socket *sock,
-			   struct msghdr *m, size_t total_len,
-			   int flags)
+static int macvtap_recvmsg(struct socket *sock, struct msghdr *m,
+			   size_t total_len, int flags)
 {
 	struct macvtap_queue *q = container_of(sock, struct macvtap_queue, sock);
 	int ret;

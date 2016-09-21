@@ -54,11 +54,11 @@ static void bounce_copy_vec(struct bio_vec *to, unsigned char *vfrom)
 	unsigned long flags;
 	unsigned char *vto;
 
-	local_irq_save(flags);
+	local_irq_save_nort(flags);
 	vto = kmap_atomic(to->bv_page);
 	memcpy(vto + to->bv_offset, vfrom, to->bv_len);
 	kunmap_atomic(vto);
-	local_irq_restore(flags);
+	local_irq_restore_nort(flags);
 }
 
 #else /* CONFIG_HIGHMEM */
@@ -221,8 +221,8 @@ bounce:
 		if (page_to_pfn(page) <= queue_bounce_pfn(q) && !force)
 			continue;
 
-		inc_zone_page_state(to->bv_page, NR_BOUNCE);
 		to->bv_page = mempool_alloc(pool, q->bounce_gfp);
+		inc_zone_page_state(to->bv_page, NR_BOUNCE);
 
 		if (rw == WRITE) {
 			char *vto, *vfrom;

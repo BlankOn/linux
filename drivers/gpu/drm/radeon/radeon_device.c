@@ -630,6 +630,23 @@ void radeon_gtt_location(struct radeon_device *rdev, struct radeon_mc *mc)
 /*
  * GPU helpers function.
  */
+
+/**
+ * radeon_device_is_virtual - check if we are running is a virtual environment
+ *
+ * Check if the asic has been passed through to a VM (all asics).
+ * Used at driver startup.
+ * Returns true if virtual or false if not.
+ */
+static bool radeon_device_is_virtual(void)
+{
+#ifdef CONFIG_X86
+	return boot_cpu_has(X86_FEATURE_HYPERVISOR);
+#else
+	return false;
+#endif
+}
+
 /**
  * radeon_card_posted - check if the hw has already been initialized
  *
@@ -642,6 +659,10 @@ void radeon_gtt_location(struct radeon_device *rdev, struct radeon_mc *mc)
 bool radeon_card_posted(struct radeon_device *rdev)
 {
 	uint32_t reg;
+
+	/* for pass through, always force asic_init */
+	if (radeon_device_is_virtual())
+		return false;
 
 	/* required for EFI mode on macbook2,1 which uses an r5xx asic */
 	if (efi_enabled(EFI_BOOT) &&
@@ -1442,6 +1463,11 @@ int radeon_device_init(struct radeon_device *rdev,
 		DRM_ERROR("registering gem debugfs failed (%d).\n", r);
 	}
 
+	r = radeon_mst_debugfs_init(rdev);
+	if (r) {
+		DRM_ERROR("registering mst debugfs failed (%d).\n", r);
+	}
+
 	if (rdev->flags & RADEON_IS_AGP && !rdev->accel_working) {
 		/* Acceleration not working on AGP card try again
 		 * with fallback to PCI or PCIE GART
@@ -1457,6 +1483,21 @@ int radeon_device_init(struct radeon_device *rdev,
 	r = radeon_ib_ring_tests(rdev);
 	if (r)
 		DRM_ERROR("ib ring test failed (%d).\n", r);
+
+	/*
+	 * Turks/Thames GPU will freeze whole laptop if DPM is not restarted
+	 * after the CP ring have chew one packet at least. Hence here we stop
+	 * and restart DPM after the radeon_ib_ring_tests().
+	 */
+	if (rdev->pm.dpm_enabled &&
+	    (rdev->pm.pm_method == PM_METHOD_DPM) &&
+	    (rdev->family == CHIP_TURKS) &&
+	    (rdev->flags & RADEON_IS_MOBILITY)) {
+		mutex_lock(&rdev->pm.mutex);
+		radeon_dpm_disable(rdev);
+		radeon_dpm_enable(rdev);
+		mutex_unlock(&rdev->pm.mutex);
+	}
 
 	if ((radeon_testing & 1)) {
 		if (rdev->accel_working)
@@ -1552,10 +1593,20 @@ int radeon_suspend_kms(struct drm_device *dev, bool suspend, bool fbcon)
 		drm_helper_connector_dpms(connector, DRM_MODE_DPMS_OFF);
 	}
 
-	/* unpin the front buffers */
+	/* unpin the front buffers and cursors */
 	list_for_each_entry(crtc, &dev->mode_config.crtc_list, head) {
+		struct radeon_crtc *radeon_crtc = to_radeon_crtc(crtc);
 		struct radeon_framebuffer *rfb = to_radeon_framebuffer(crtc->primary->fb);
 		struct radeon_bo *robj;
+
+		if (radeon_crtc->cursor_bo) {
+			struct radeon_bo *robj = gem_to_radeon_bo(radeon_crtc->cursor_bo);
+			r = radeon_bo_reserve(robj, false);
+			if (r == 0) {
+				radeon_bo_unpin(robj);
+				radeon_bo_unreserve(robj);
+			}
+		}
 
 		if (rfb == NULL || rfb->obj == NULL) {
 			continue;
@@ -1619,6 +1670,7 @@ int radeon_resume_kms(struct drm_device *dev, bool resume, bool fbcon)
 {
 	struct drm_connector *connector;
 	struct radeon_device *rdev = dev->dev_private;
+	struct drm_crtc *crtc;
 	int r;
 
 	if (dev->switch_power_state == DRM_SWITCH_POWER_OFF)
@@ -1657,6 +1709,27 @@ int radeon_resume_kms(struct drm_device *dev, bool resume, bool fbcon)
 	}
 
 	radeon_restore_bios_scratch_regs(rdev);
+
+	/* pin cursors */
+	list_for_each_entry(crtc, &dev->mode_config.crtc_list, head) {
+		struct radeon_crtc *radeon_crtc = to_radeon_crtc(crtc);
+
+		if (radeon_crtc->cursor_bo) {
+			struct radeon_bo *robj = gem_to_radeon_bo(radeon_crtc->cursor_bo);
+			r = radeon_bo_reserve(robj, false);
+			if (r == 0) {
+				/* Only 27 bit offset for legacy cursor */
+				r = radeon_bo_pin_restricted(robj,
+							     RADEON_GEM_DOMAIN_VRAM,
+							     ASIC_IS_AVIVO(rdev) ?
+							     0 : 1 << 27,
+							     &radeon_crtc->cursor_addr);
+				if (r != 0)
+					DRM_ERROR("Failed to pin cursor BO (%d)\n", r);
+				radeon_bo_unreserve(robj);
+			}
+		}
+	}
 
 	/* init dig PHYs, disp eng pll */
 	if (rdev->is_atom_bios) {

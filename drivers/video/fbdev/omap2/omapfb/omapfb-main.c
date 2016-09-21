@@ -29,6 +29,7 @@
 #include <linux/device.h>
 #include <linux/platform_device.h>
 #include <linux/omapfb.h>
+#include <linux/suspend.h>
 
 #include <video/omapdss.h>
 #include <video/omapvrfb.h>
@@ -2073,7 +2074,7 @@ static int omapfb_mode_to_timings(const char *mode_str,
 	} else {
 		timings->data_pclk_edge = OMAPDSS_DRIVE_SIG_RISING_EDGE;
 		timings->de_level = OMAPDSS_SIG_ACTIVE_HIGH;
-		timings->sync_pclk_edge = OMAPDSS_DRIVE_SIG_OPPOSITE_EDGES;
+		timings->sync_pclk_edge = OMAPDSS_DRIVE_SIG_FALLING_EDGE;
 	}
 
 	timings->pixelclock = PICOS2KHZ(var->pixclock) * 1000;
@@ -2223,7 +2224,7 @@ static void fb_videomode_to_omap_timings(struct fb_videomode *m,
 	} else {
 		t->data_pclk_edge = OMAPDSS_DRIVE_SIG_RISING_EDGE;
 		t->de_level = OMAPDSS_SIG_ACTIVE_HIGH;
-		t->sync_pclk_edge = OMAPDSS_DRIVE_SIG_OPPOSITE_EDGES;
+		t->sync_pclk_edge = OMAPDSS_DRIVE_SIG_FALLING_EDGE;
 	}
 
 	t->x_res = m->xres;
@@ -2607,6 +2608,14 @@ static int omapfb_probe(struct platform_device *pdev)
 		dev_info(fbdev->dev, "using display '%s' mode %dx%d\n",
 			def_display->name, w, h);
 	}
+
+	/*
+	 * disable creation of new console during suspend.
+	 * this works around a problem where a ctrl-c is needed
+	 * to be entered on the VT to actually get the device
+	 * to continue into the suspend state.
+	 */
+	pm_set_vt_switch(0);
 
 	return 0;
 

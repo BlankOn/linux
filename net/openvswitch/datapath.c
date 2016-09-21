@@ -203,7 +203,6 @@ static void destroy_dp_rcu(struct rcu_head *rcu)
 
 	ovs_flow_tbl_destroy(&dp->table);
 	free_percpu(dp->stats_percpu);
-	release_net(ovs_dp_get_net(dp));
 	kfree(dp->ports);
 	kfree(dp);
 }
@@ -338,12 +337,10 @@ static int queue_gso_packets(struct datapath *dp, struct sk_buff *skb,
 	unsigned short gso_type = skb_shinfo(skb)->gso_type;
 	struct sw_flow_key later_key;
 	struct sk_buff *segs, *nskb;
-	struct ovs_skb_cb ovs_cb;
 	int err;
 
-	ovs_cb = *OVS_CB(skb);
+	BUILD_BUG_ON(sizeof(*OVS_CB(skb)) > SKB_SGO_CB_OFFSET);
 	segs = __skb_gso_segment(skb, NETIF_F_SG, false);
-	*OVS_CB(skb) = ovs_cb;
 	if (IS_ERR(segs))
 		return PTR_ERR(segs);
 	if (segs == NULL)
@@ -361,7 +358,6 @@ static int queue_gso_packets(struct datapath *dp, struct sk_buff *skb,
 	/* Queue all of the segments. */
 	skb = segs;
 	do {
-		*OVS_CB(skb) = ovs_cb;
 		if (gso_type & SKB_GSO_UDP && skb != segs)
 			key = &later_key;
 
@@ -907,7 +903,7 @@ static int ovs_flow_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	if (error)
 		goto err_kfree_flow;
 
-	ovs_flow_mask_key(&new_flow->key, &key, &mask);
+	ovs_flow_mask_key(&new_flow->key, &key, true, &mask);
 
 	/* Extract flow identifier. */
 	error = ovs_nla_get_identifier(&new_flow->id, a[OVS_FLOW_ATTR_UFID],
@@ -1034,7 +1030,7 @@ static struct sw_flow_actions *get_flow_actions(const struct nlattr *a,
 	struct sw_flow_key masked_key;
 	int error;
 
-	ovs_flow_mask_key(&masked_key, key, mask);
+	ovs_flow_mask_key(&masked_key, key, true, mask);
 	error = ovs_nla_copy_actions(a, &masked_key, &acts, log);
 	if (error) {
 		OVS_NLERR(log,
@@ -1501,7 +1497,7 @@ static int ovs_dp_cmd_new(struct sk_buff *skb, struct genl_info *info)
 	if (dp == NULL)
 		goto err_free_reply;
 
-	ovs_dp_set_net(dp, hold_net(sock_net(skb->sk)));
+	ovs_dp_set_net(dp, sock_net(skb->sk));
 
 	/* Allocate table. */
 	err = ovs_flow_tbl_init(&dp->table);
@@ -1575,7 +1571,6 @@ err_destroy_percpu:
 err_destroy_table:
 	ovs_flow_tbl_destroy(&dp->table);
 err_free_dp:
-	release_net(ovs_dp_get_net(dp));
 	kfree(dp);
 err_free_reply:
 	kfree_skb(reply);

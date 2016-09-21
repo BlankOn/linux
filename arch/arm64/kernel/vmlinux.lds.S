@@ -23,10 +23,14 @@ jiffies = jiffies_64;
 
 #define HYPERVISOR_TEXT					\
 	/*						\
-	 * Force the alignment to be compatible with	\
-	 * the vectors requirements			\
+	 * Align to 4 KB so that			\
+	 * a) the HYP vector table is at its minimum	\
+	 *    alignment of 2048 bytes			\
+	 * b) the HYP init code will not cross a page	\
+	 *    boundary if its size does not exceed	\
+	 *    4 KB (see related ASSERT() below)		\
 	 */						\
-	. = ALIGN(2048);				\
+	. = ALIGN(SZ_4K);				\
 	VMLINUX_SYMBOL(__hyp_idmap_text_start) = .;	\
 	*(.hyp.idmap.text)				\
 	VMLINUX_SYMBOL(__hyp_idmap_text_end) = .;	\
@@ -50,8 +54,11 @@ PECOFF_FILE_ALIGNMENT = 0x200;
 #define PECOFF_EDATA_PADDING
 #endif
 
-#ifdef CONFIG_DEBUG_ALIGN_RODATA
+#if defined(CONFIG_DEBUG_ALIGN_RODATA)
 #define ALIGN_DEBUG_RO			. = ALIGN(1<<SECTION_SHIFT);
+#define ALIGN_DEBUG_RO_MIN(min)		ALIGN_DEBUG_RO
+#elif defined(CONFIG_DEBUG_RODATA)
+#define ALIGN_DEBUG_RO			. = ALIGN(1<<PAGE_SHIFT);
 #define ALIGN_DEBUG_RO_MIN(min)		ALIGN_DEBUG_RO
 #else
 #define ALIGN_DEBUG_RO
@@ -163,10 +170,11 @@ SECTIONS
 }
 
 /*
- * The HYP init code can't be more than a page long.
+ * The HYP init code can't be more than a page long,
+ * and should not cross a page boundary.
  */
-ASSERT(((__hyp_idmap_text_start + PAGE_SIZE) > __hyp_idmap_text_end),
-       "HYP init code too big")
+ASSERT(__hyp_idmap_text_end - (__hyp_idmap_text_start & ~(SZ_4K - 1)) <= SZ_4K,
+	"HYP init code too big or misaligned")
 
 /*
  * If padding is applied before .head.text, virt<->phys conversions will fail.

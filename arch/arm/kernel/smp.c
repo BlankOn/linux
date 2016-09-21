@@ -86,9 +86,11 @@ void __init smp_set_ops(struct smp_operations *ops)
 
 static unsigned long get_arch_pgd(pgd_t *pgd)
 {
-	phys_addr_t pgdir = virt_to_idmap(pgd);
-	BUG_ON(pgdir & ARCH_PGD_MASK);
-	return pgdir >> ARCH_PGD_SHIFT;
+#ifdef CONFIG_ARM_LPAE
+	return __phys_to_pfn(virt_to_phys(pgd));
+#else
+	return virt_to_phys(pgd);
+#endif
 }
 
 int __cpu_up(unsigned int cpu, struct task_struct *idle)
@@ -108,7 +110,7 @@ int __cpu_up(unsigned int cpu, struct task_struct *idle)
 #endif
 
 #ifdef CONFIG_MMU
-	secondary_data.pgdir = get_arch_pgd(idmap_pgd);
+	secondary_data.pgdir = virt_to_phys(idmap_pgd);
 	secondary_data.swapper_pg_dir = get_arch_pgd(swapper_pg_dir);
 #endif
 	sync_cache_w(&secondary_data);
@@ -143,6 +145,11 @@ void __init smp_init_cpus(void)
 {
 	if (smp_ops.smp_init_cpus)
 		smp_ops.smp_init_cpus();
+}
+
+int platform_can_secondary_boot(void)
+{
+	return !!smp_ops.smp_boot_secondary;
 }
 
 int platform_can_cpu_hotplug(void)
@@ -208,8 +215,6 @@ int __cpu_disable(void)
 	flush_cache_louis();
 	local_flush_tlb_all();
 
-	clear_tasks_mm_cpumask(cpu);
-
 	return 0;
 }
 
@@ -225,6 +230,9 @@ void __cpu_die(unsigned int cpu)
 		pr_err("CPU%u: cpu didn't die\n", cpu);
 		return;
 	}
+
+	clear_tasks_mm_cpumask(cpu);
+
 	pr_notice("CPU%u: shutdown\n", cpu);
 
 	/*
@@ -378,6 +386,7 @@ asmlinkage void secondary_start_kernel(void)
 
 	local_irq_enable();
 	local_fiq_enable();
+	local_abt_enable();
 
 	/*
 	 * OK, it's off to the idle thread for us
@@ -571,7 +580,7 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 	struct pt_regs *old_regs = set_irq_regs(regs);
 
 	if ((unsigned)ipinr < NR_IPI) {
-		trace_ipi_entry(ipi_types[ipinr]);
+		trace_ipi_entry_rcuidle(ipi_types[ipinr]);
 		__inc_irq_stat(cpu, ipi_irqs[ipinr]);
 	}
 
@@ -630,7 +639,7 @@ void handle_IPI(int ipinr, struct pt_regs *regs)
 	}
 
 	if ((unsigned)ipinr < NR_IPI)
-		trace_ipi_exit(ipi_types[ipinr]);
+		trace_ipi_exit_rcuidle(ipi_types[ipinr]);
 	set_irq_regs(old_regs);
 }
 

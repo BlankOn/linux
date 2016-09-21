@@ -28,6 +28,7 @@
 #include <linux/ftrace.h>
 #include <trace/events/power.h>
 #include <linux/compiler.h>
+#include <linux/moduleparam.h>
 
 #include "power.h"
 
@@ -233,12 +234,20 @@ static bool platform_suspend_again(suspend_state_t state)
 		suspend_ops->suspend_again() : false;
 }
 
+#ifdef CONFIG_PM_DEBUG
+static unsigned int pm_test_delay = 5;
+module_param(pm_test_delay, uint, 0644);
+MODULE_PARM_DESC(pm_test_delay,
+		 "Number of seconds to wait before resuming from suspend test");
+#endif
+
 static int suspend_test(int level)
 {
 #ifdef CONFIG_PM_DEBUG
 	if (pm_test_level == level) {
-		printk(KERN_INFO "suspend debug: Waiting for 5 seconds.\n");
-		mdelay(5000);
+		printk(KERN_INFO "suspend debug: Waiting for %d second(s).\n",
+				pm_test_delay);
+		mdelay(pm_test_delay * 1000);
 		return 1;
 	}
 #endif /* !CONFIG_PM_DEBUG */
@@ -347,6 +356,8 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 	arch_suspend_disable_irqs();
 	BUG_ON(!irqs_disabled());
 
+	system_state = SYSTEM_SUSPEND;
+
 	error = syscore_suspend();
 	if (!error) {
 		*wakeup = pm_wakeup_pending();
@@ -360,6 +371,8 @@ static int suspend_enter(suspend_state_t state, bool *wakeup)
 		}
 		syscore_resume();
 	}
+
+	system_state = SYSTEM_RUNNING;
 
 	arch_suspend_enable_irqs();
 	BUG_ON(irqs_disabled());

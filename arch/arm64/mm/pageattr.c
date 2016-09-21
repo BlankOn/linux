@@ -57,6 +57,9 @@ static int change_memory_common(unsigned long addr, int numpages,
 	if (end < MODULES_VADDR || end >= MODULES_END)
 		return -EINVAL;
 
+	if (!numpages)
+		return 0;
+
 	data.set_mask = set_mask;
 	data.clear_mask = clear_mask;
 
@@ -73,7 +76,6 @@ int set_memory_ro(unsigned long addr, int numpages)
 					__pgprot(PTE_RDONLY),
 					__pgprot(PTE_WRITE));
 }
-EXPORT_SYMBOL_GPL(set_memory_ro);
 
 int set_memory_rw(unsigned long addr, int numpages)
 {
@@ -81,7 +83,6 @@ int set_memory_rw(unsigned long addr, int numpages)
 					__pgprot(PTE_WRITE),
 					__pgprot(PTE_RDONLY));
 }
-EXPORT_SYMBOL_GPL(set_memory_rw);
 
 int set_memory_nx(unsigned long addr, int numpages)
 {

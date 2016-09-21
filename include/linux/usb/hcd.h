@@ -169,6 +169,7 @@ struct usb_hcd {
 	 * bandwidth_mutex should be dropped after a successful control message
 	 * to the device, or resetting the bandwidth after a failed attempt.
 	 */
+	struct mutex		*address0_mutex;
 	struct mutex		*bandwidth_mutex;
 	struct usb_hcd		*shared_hcd;
 	struct usb_hcd		*primary_hcd;
@@ -384,6 +385,20 @@ struct hc_driver {
 	/* Call for power on/off the port if necessary */
 	int	(*port_power)(struct usb_hcd *hcd, int portnum, bool enable);
 
+};
+
+/**
+ * struct otg_hcd_ops - Interface between OTG core and HCD
+ *
+ * Provided by the HCD core to allow the OTG core to start/stop the HCD
+ *
+ * @add: function to add the HCD
+ * @remove: function to remove the HCD
+ */
+struct otg_hcd_ops {
+	int (*add)(struct usb_hcd *hcd,
+		   unsigned int irqnum, unsigned long irqflags);
+	void (*remove)(struct usb_hcd *hcd);
 };
 
 static inline int hcd_giveback_urb_in_bh(struct usb_hcd *hcd)

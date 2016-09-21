@@ -1036,7 +1036,7 @@ static void igb_reset_q_vector(struct igb_adapter *adapter, int v_idx)
 		adapter->tx_ring[q_vector->tx.ring->queue_index] = NULL;
 
 	if (q_vector->rx.ring)
-		adapter->tx_ring[q_vector->rx.ring->queue_index] = NULL;
+		adapter->rx_ring[q_vector->rx.ring->queue_index] = NULL;
 
 	netif_napi_del(&q_vector->napi);
 
@@ -1205,8 +1205,14 @@ static int igb_alloc_q_vector(struct igb_adapter *adapter,
 
 	/* allocate q_vector and rings */
 	q_vector = adapter->q_vector[v_idx];
-	if (!q_vector)
+	if (!q_vector) {
 		q_vector = kzalloc(size, GFP_KERNEL);
+	} else if (size > ksize(q_vector)) {
+		kfree_rcu(q_vector, rcu);
+		q_vector = kzalloc(size, GFP_KERNEL);
+	} else {
+		memset(q_vector, 0, size);
+	}
 	if (!q_vector)
 		return -ENOMEM;
 
@@ -1776,6 +1782,7 @@ void igb_down(struct igb_adapter *adapter)
 	wr32(E1000_RCTL, rctl & ~E1000_RCTL_EN);
 	/* flush and sleep below */
 
+	netif_carrier_off(netdev);
 	netif_tx_stop_all_queues(netdev);
 
 	/* disable transmits in the hardware */
@@ -1797,11 +1804,8 @@ void igb_down(struct igb_adapter *adapter)
 		}
 	}
 
-
 	del_timer_sync(&adapter->watchdog_timer);
 	del_timer_sync(&adapter->phy_info_timer);
-
-	netif_carrier_off(netdev);
 
 	/* record the stats before reset*/
 	spin_lock(&adapter->stats64_lock);
@@ -2095,6 +2099,7 @@ static const struct net_device_ops igb_netdev_ops = {
 #endif
 	.ndo_fix_features	= igb_fix_features,
 	.ndo_set_features	= igb_set_features,
+	.ndo_features_check	= passthru_features_check,
 };
 
 /**
@@ -2859,7 +2864,7 @@ static void igb_probe_vfs(struct igb_adapter *adapter)
 		return;
 
 	pci_sriov_set_totalvfs(pdev, 7);
-	igb_pci_enable_sriov(pdev, max_vfs);
+	igb_enable_sriov(pdev, max_vfs);
 
 #endif /* CONFIG_PCI_IOV */
 }
@@ -2899,6 +2904,14 @@ static void igb_init_queue_configuration(struct igb_adapter *adapter)
 	}
 
 	adapter->rss_queues = min_t(u32, max_rss_queues, num_online_cpus());
+
+	igb_set_flag_queue_pairs(adapter, max_rss_queues);
+}
+
+void igb_set_flag_queue_pairs(struct igb_adapter *adapter,
+			      const u32 max_rss_queues)
+{
+	struct e1000_hw *hw = &adapter->hw;
 
 	/* Determine if we need to pair queues. */
 	switch (hw->mac.type) {
@@ -6583,7 +6596,7 @@ static void igb_reuse_rx_page(struct igb_ring *rx_ring,
 
 static inline bool igb_page_is_reserved(struct page *page)
 {
-	return (page_to_nid(page) != numa_mem_id()) || page->pfmemalloc;
+	return (page_to_nid(page) != numa_mem_id()) || page_is_pfmemalloc(page);
 }
 
 static bool igb_can_reuse_rx_page(struct igb_rx_buffer *rx_buffer,

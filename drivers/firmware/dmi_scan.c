@@ -89,9 +89,9 @@ static void dmi_table(u8 *buf,
 
 	/*
 	 * Stop when we have seen all the items the table claimed to have
-	 * (SMBIOS < 3.0 only) OR we reach an end-of-table marker OR we run
-	 * off the end of the table (should never happen but sometimes does
-	 * on bogus implementations.)
+	 * (SMBIOS < 3.0 only) OR we reach an end-of-table marker (SMBIOS
+	 * >= 3.0 only) OR we run off the end of the table (should never
+	 * happen but sometimes does on bogus implementations.)
 	 */
 	while ((!dmi_num || i < dmi_num) &&
 	       (data - buf + sizeof(struct dmi_header)) <= dmi_len) {
@@ -110,8 +110,13 @@ static void dmi_table(u8 *buf,
 
 		/*
 		 * 7.45 End-of-Table (Type 127) [SMBIOS reference spec v3.0.0]
+		 * For tables behind a 64-bit entry point, we have no item
+		 * count and no exact table length, so stop on end-of-table
+		 * marker. For tables behind a 32-bit entry point, we have
+		 * seen OEM structures behind the end-of-table marker on
+		 * some systems, so don't trust it.
 		 */
-		if (dm->type == DMI_ENTRY_END_OF_TABLE)
+		if (!dmi_num && dm->type == DMI_ENTRY_END_OF_TABLE)
 			break;
 
 		data += 2;
@@ -499,19 +504,19 @@ static int __init dmi_present(const u8 *buf)
 	buf += 16;
 
 	if (memcmp(buf, "_DMI_", 5) == 0 && dmi_checksum(buf, 15)) {
+		if (smbios_ver)
+			dmi_ver = smbios_ver;
+		else
+			dmi_ver = (buf[14] & 0xF0) << 4 | (buf[14] & 0x0F);
 		dmi_num = get_unaligned_le16(buf + 12);
 		dmi_len = get_unaligned_le16(buf + 6);
 		dmi_base = get_unaligned_le32(buf + 8);
 
 		if (dmi_walk_early(dmi_decode) == 0) {
 			if (smbios_ver) {
-				dmi_ver = smbios_ver;
-				pr_info("SMBIOS %d.%d%s present.\n",
-					dmi_ver >> 8, dmi_ver & 0xFF,
-					(dmi_ver < 0x0300) ? "" : ".x");
+				pr_info("SMBIOS %d.%d present.\n",
+				       dmi_ver >> 8, dmi_ver & 0xFF);
 			} else {
-				dmi_ver = (buf[14] & 0xF0) << 4 |
-					   (buf[14] & 0x0F);
 				pr_info("Legacy DMI %d.%d present.\n",
 				       dmi_ver >> 8, dmi_ver & 0xFF);
 			}

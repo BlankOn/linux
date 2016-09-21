@@ -647,6 +647,7 @@ unsigned char ibm_architecture_vec[] = {
 	W(0xffff0000), W(0x003e0000),	/* POWER6 */
 	W(0xffff0000), W(0x003f0000),	/* POWER7 */
 	W(0xffff0000), W(0x004b0000),	/* POWER8E */
+	W(0xffff0000), W(0x004c0000),   /* POWER8NVL */
 	W(0xffff0000), W(0x004d0000),	/* POWER8 */
 	W(0xffffffff), W(0x0f000004),	/* all 2.07-compliant */
 	W(0xffffffff), W(0x0f000003),	/* all 2.06-compliant */
@@ -709,7 +710,7 @@ unsigned char ibm_architecture_vec[] = {
 	 * must match by the macro below. Update the definition if
 	 * the structure layout changes.
 	 */
-#define IBM_ARCH_VEC_NRCORES_OFFSET	125
+#define IBM_ARCH_VEC_NRCORES_OFFSET	133
 	W(NR_CPUS),			/* number of cores supported */
 	0,
 	0,
@@ -2898,7 +2899,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 	 * Call OF "quiesce" method to shut down pending DMA's from
 	 * devices etc...
 	 */
-	prom_printf("Calling quiesce...\n");
+	prom_printf("Quiescing Open Firmware ...\n");
 	call_prom("quiesce", 0, 0);
 
 	/*
@@ -2910,7 +2911,7 @@ unsigned long __init prom_init(unsigned long r3, unsigned long r4,
 
 	/* Don't print anything after quiesce under OPAL, it crashes OFW */
 	if (of_platform != PLATFORM_OPAL) {
-		prom_printf("returning from prom_init\n");
+		prom_printf("Booting Linux via __start() ...\n");
 		prom_debug("->dt_header_start=0x%x\n", hdr);
 	}
 

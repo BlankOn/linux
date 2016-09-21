@@ -520,7 +520,6 @@ static int ci_otg_start_host(struct otg_fsm *fsm, int on)
 {
 	struct ci_hdrc	*ci = container_of(fsm, struct ci_hdrc, fsm);
 
-	mutex_unlock(&fsm->lock);
 	if (on) {
 		ci_role_stop(ci);
 		ci_role_start(ci, CI_ROLE_HOST);
@@ -529,7 +528,6 @@ static int ci_otg_start_host(struct otg_fsm *fsm, int on)
 		hw_device_reset(ci);
 		ci_role_start(ci, CI_ROLE_GADGET);
 	}
-	mutex_lock(&fsm->lock);
 	return 0;
 }
 
@@ -537,12 +535,10 @@ static int ci_otg_start_gadget(struct otg_fsm *fsm, int on)
 {
 	struct ci_hdrc	*ci = container_of(fsm, struct ci_hdrc, fsm);
 
-	mutex_unlock(&fsm->lock);
 	if (on)
 		usb_gadget_vbus_connect(&ci->gadget);
 	else
 		usb_gadget_vbus_disconnect(&ci->gadget);
-	mutex_lock(&fsm->lock);
 
 	return 0;
 }
@@ -781,6 +777,7 @@ int ci_hdrc_otg_fsm_init(struct ci_hdrc *ci)
 	ci->fsm.id = hw_read_otgsc(ci, OTGSC_ID) ? 1 : 0;
 	ci->fsm.otg->state = OTG_STATE_UNDEFINED;
 	ci->fsm.ops = &ci_otg_ops;
+	ci->fsm.dev = ci->dev;
 
 	mutex_init(&ci->fsm.lock);
 

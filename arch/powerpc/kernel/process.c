@@ -204,8 +204,6 @@ EXPORT_SYMBOL_GPL(flush_altivec_to_thread);
 #endif /* CONFIG_ALTIVEC */
 
 #ifdef CONFIG_VSX
-#if 0
-/* not currently used, but some crazy RAID module might want to later */
 void enable_kernel_vsx(void)
 {
 	WARN_ON(preemptible());
@@ -220,7 +218,6 @@ void enable_kernel_vsx(void)
 #endif /* CONFIG_SMP */
 }
 EXPORT_SYMBOL(enable_kernel_vsx);
-#endif
 
 void giveup_vsx(struct task_struct *tsk)
 {
@@ -553,6 +550,24 @@ static void tm_reclaim_thread(struct thread_struct *thr,
 		clear_ti_thread_flag(ti, TIF_RESTORE_TM);
 		msr_diff &= MSR_FP | MSR_VEC | MSR_VSX | MSR_FE0 | MSR_FE1;
 	}
+
+	/*
+	 * Use the current MSR TM suspended bit to track if we have
+	 * checkpointed state outstanding.
+	 * On signal delivery, we'd normally reclaim the checkpointed
+	 * state to obtain stack pointer (see:get_tm_stackpointer()).
+	 * This will then directly return to userspace without going
+	 * through __switch_to(). However, if the stack frame is bad,
+	 * we need to exit this thread which calls __switch_to() which
+	 * will again attempt to reclaim the already saved tm state.
+	 * Hence we need to check that we've not already reclaimed
+	 * this state.
+	 * We do this using the current MSR, rather tracking it in
+	 * some specific thread_struct bit, as it has the additional
+	 * benifit of checking for a potential TM bad thing exception.
+	 */
+	if (!MSR_TM_SUSPENDED(mfmsr()))
+		return;
 
 	tm_reclaim(thr, thr->regs->msr, cause);
 
@@ -1114,8 +1129,11 @@ static void setup_ksp_vsid(struct task_struct *p, unsigned long sp)
  */
 extern unsigned long dscr_default; /* defined in arch/powerpc/kernel/sysfs.c */
 
+/*
+ * Copy architecture-specific thread state
+ */
 int copy_thread(unsigned long clone_flags, unsigned long usp,
-		unsigned long arg, struct task_struct *p)
+		unsigned long kthread_arg, struct task_struct *p)
 {
 	struct pt_regs *childregs, *kregs;
 	extern void ret_from_fork(void);
@@ -1127,6 +1145,7 @@ int copy_thread(unsigned long clone_flags, unsigned long usp,
 	sp -= sizeof(struct pt_regs);
 	childregs = (struct pt_regs *) sp;
 	if (unlikely(p->flags & PF_KTHREAD)) {
+		/* kernel thread */
 		struct thread_info *ti = (void *)task_stack_page(p);
 		memset(childregs, 0, sizeof(struct pt_regs));
 		childregs->gpr[1] = sp + sizeof(struct pt_regs);
@@ -1137,11 +1156,12 @@ int copy_thread(unsigned long clone_flags, unsigned long usp,
 		clear_tsk_thread_flag(p, TIF_32BIT);
 		childregs->softe = 1;
 #endif
-		childregs->gpr[15] = arg;
+		childregs->gpr[15] = kthread_arg;
 		p->thread.regs = NULL;	/* no user register state */
 		ti->flags |= _TIF_RESTOREALL;
 		f = ret_from_kernel_thread;
 	} else {
+		/* user thread */
 		struct pt_regs *regs = current_pt_regs();
 		CHECK_FULL_REGS(regs);
 		*childregs = *regs;
@@ -1219,6 +1239,16 @@ void start_thread(struct pt_regs *regs, unsigned long start, unsigned long sp)
 		struct pt_regs *regs = task_stack_page(current) + THREAD_SIZE;
 		current->thread.regs = regs - 1;
 	}
+
+#ifdef CONFIG_PPC_TRANSACTIONAL_MEM
+	/*
+	 * Clear any transactional state, we're exec()ing. The cause is
+	 * not important as there will never be a recheckpoint so it's not
+	 * user visible.
+	 */
+	if (MSR_TM_SUSPENDED(mfmsr()))
+		tm_reclaim_current(0);
+#endif
 
 	memset(regs->gpr, 0, sizeof(regs->gpr));
 	regs->ctr = 0;

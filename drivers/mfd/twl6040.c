@@ -647,6 +647,8 @@ static int twl6040_probe(struct i2c_client *client,
 
 	twl6040->clk32k = devm_clk_get(&client->dev, "clk32k");
 	if (IS_ERR(twl6040->clk32k)) {
+		if (PTR_ERR(twl6040->clk32k) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
 		dev_info(&client->dev, "clk32k is not handled\n");
 		twl6040->clk32k = NULL;
 	}
@@ -814,4 +816,3 @@ MODULE_DESCRIPTION("TWL6040 MFD");
 MODULE_AUTHOR("Misael Lopez Cruz <misael.lopez@ti.com>");
 MODULE_AUTHOR("Jorge Eduardo Candelaria <jorge.candelaria@ti.com>");
 MODULE_LICENSE("GPL");
-MODULE_ALIAS("platform:twl6040");

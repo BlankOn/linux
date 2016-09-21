@@ -44,6 +44,16 @@ int virtqueue_add_inbuf(struct virtqueue *vq,
 			void *data,
 			gfp_t gfp);
 
+int virtqueue_add_outbuf_rpmsg(struct virtqueue *vq,
+			       struct scatterlist sg[], unsigned int num,
+			       void *data,
+			       gfp_t gfp);
+
+int virtqueue_add_inbuf_rpmsg(struct virtqueue *vq,
+			      struct scatterlist sg[], unsigned int num,
+			      void *data,
+			      gfp_t gfp);
+
 int virtqueue_add_sgs(struct virtqueue *vq,
 		      struct scatterlist *sgs[],
 		      unsigned int out_sgs,
@@ -107,8 +117,6 @@ struct virtio_device {
 	u64 features;
 	void *priv;
 };
-
-bool virtio_device_is_legacy_only(struct virtio_device_id id);
 
 static inline struct virtio_device *dev_to_virtio(struct device *_dev)
 {

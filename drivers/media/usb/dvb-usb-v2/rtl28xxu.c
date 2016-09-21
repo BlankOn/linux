@@ -34,6 +34,14 @@ static int rtl28xxu_ctrl_msg(struct dvb_usb_device *d, struct rtl28xxu_req *req)
 	unsigned int pipe;
 	u8 requesttype;
 
+	mutex_lock(&d->usb_mutex);
+
+	if (req->size > sizeof(dev->buf)) {
+		dev_err(&d->intf->dev, "too large message %u\n", req->size);
+		ret = -EINVAL;
+		goto err_mutex_unlock;
+	}
+
 	if (req->index & CMD_WR_FLAG) {
 		/* write */
 		memcpy(dev->buf, req->data, req->size);
@@ -50,14 +58,17 @@ static int rtl28xxu_ctrl_msg(struct dvb_usb_device *d, struct rtl28xxu_req *req)
 	dvb_usb_dbg_usb_control_msg(d->udev, 0, requesttype, req->value,
 			req->index, dev->buf, req->size);
 	if (ret < 0)
-		goto err;
+		goto err_mutex_unlock;
 
 	/* read request, copy returned data to return buf */
 	if (requesttype == (USB_TYPE_VENDOR | USB_DIR_IN))
 		memcpy(req->data, dev->buf, req->size);
 
+	mutex_unlock(&d->usb_mutex);
+
 	return 0;
-err:
+err_mutex_unlock:
+	mutex_unlock(&d->usb_mutex);
 	dev_dbg(&d->intf->dev, "failed=%d\n", ret);
 	return ret;
 }
@@ -866,6 +877,8 @@ static int rtl2832u_frontend_attach(struct dvb_usb_adapter *adap)
 			mn88472_config.i2c_wr_max = 22,
 			strlcpy(info.type, "mn88472", I2C_NAME_SIZE);
 			mn88472_config.xtal = 20500000;
+			mn88472_config.ts_mode = SERIAL_TS_MODE;
+			mn88472_config.ts_clock = VARIABLE_TS_CLOCK;
 			info.addr = 0x18;
 			info.platform_data = &mn88472_config;
 			request_module(info.type);
@@ -1609,7 +1622,7 @@ static int rtl2832u_get_rc_config(struct dvb_usb_device *d,
 	rc->allowed_protos = RC_BIT_ALL;
 	rc->driver_type = RC_DRIVER_IR_RAW;
 	rc->query = rtl2832u_rc_query;
-	rc->interval = 400;
+	rc->interval = 200;
 
 	return 0;
 }
@@ -1724,6 +1737,8 @@ static const struct usb_device_id rtl28xxu_id_table[] = {
 		&rtl28xxu_props, "DigitalNow Quad DVB-T Receiver", NULL) },
 	{ DVB_USB_DEVICE(USB_VID_LEADTEK, USB_PID_WINFAST_DTV_DONGLE_MINID,
 		&rtl28xxu_props, "Leadtek Winfast DTV Dongle Mini D", NULL) },
+	{ DVB_USB_DEVICE(USB_VID_LEADTEK, USB_PID_WINFAST_DTV2000DS_PLUS,
+		&rtl28xxu_props, "Leadtek WinFast DTV2000DS Plus", RC_MAP_LEADTEK_Y04G0051) },
 	{ DVB_USB_DEVICE(USB_VID_TERRATEC, 0x00d3,
 		&rtl28xxu_props, "TerraTec Cinergy T Stick RC (Rev. 3)", NULL) },
 	{ DVB_USB_DEVICE(USB_VID_DEXATEK, 0x1102,
@@ -1754,6 +1769,8 @@ static const struct usb_device_id rtl28xxu_id_table[] = {
 		&rtl28xxu_props, "Sveon STV21", NULL) },
 	{ DVB_USB_DEVICE(USB_VID_KWORLD_2, USB_PID_SVEON_STV27,
 		&rtl28xxu_props, "Sveon STV27", NULL) },
+	{ DVB_USB_DEVICE(USB_VID_KWORLD_2, USB_PID_TURBOX_DTT_2000,
+		&rtl28xxu_props, "TURBO-X Pure TV Tuner DTT-2000", NULL) },
 
 	/* RTL2832P devices: */
 	{ DVB_USB_DEVICE(USB_VID_HANFTEK, 0x0131,

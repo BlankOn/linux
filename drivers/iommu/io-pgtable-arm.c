@@ -116,6 +116,8 @@
 #define ARM_32_LPAE_TCR_EAE		(1 << 31)
 #define ARM_64_LPAE_S2_TCR_RES1		(1 << 31)
 
+#define ARM_LPAE_TCR_EPD1		(1 << 23)
+
 #define ARM_LPAE_TCR_TG0_4K		(0 << 14)
 #define ARM_LPAE_TCR_TG0_64K		(1 << 14)
 #define ARM_LPAE_TCR_TG0_16K		(2 << 14)
@@ -198,6 +200,10 @@ typedef u64 arm_lpae_iopte;
 
 static bool selftest_running = false;
 
+static int __arm_lpae_unmap(struct arm_lpae_io_pgtable *data,
+			    unsigned long iova, size_t size, int lvl,
+			    arm_lpae_iopte *ptep);
+
 static int arm_lpae_init_pte(struct arm_lpae_io_pgtable *data,
 			     unsigned long iova, phys_addr_t paddr,
 			     arm_lpae_iopte prot, int lvl,
@@ -205,10 +211,21 @@ static int arm_lpae_init_pte(struct arm_lpae_io_pgtable *data,
 {
 	arm_lpae_iopte pte = prot;
 
-	/* We require an unmap first */
 	if (iopte_leaf(*ptep, lvl)) {
+		/* We require an unmap first */
 		WARN_ON(!selftest_running);
 		return -EEXIST;
+	} else if (iopte_type(*ptep, lvl) == ARM_LPAE_PTE_TYPE_TABLE) {
+		/*
+		 * We need to unmap and free the old table before
+		 * overwriting it with a block entry.
+		 */
+		arm_lpae_iopte *tblp;
+		size_t sz = ARM_LPAE_BLOCK_SIZE(lvl, data);
+
+		tblp = ptep - ARM_LPAE_LVL_IDX(iova, lvl, data);
+		if (WARN_ON(__arm_lpae_unmap(data, iova, sz, lvl, tblp) != sz))
+			return -EINVAL;
 	}
 
 	if (data->iop.cfg.quirks & IO_PGTABLE_QUIRK_ARM_NS)
@@ -324,17 +341,18 @@ static void __arm_lpae_free_pgtable(struct arm_lpae_io_pgtable *data, int lvl,
 	arm_lpae_iopte *start, *end;
 	unsigned long table_size;
 
-	/* Only leaf entries at the last level */
-	if (lvl == ARM_LPAE_MAX_LEVELS - 1)
-		return;
-
 	if (lvl == ARM_LPAE_START_LVL(data))
 		table_size = data->pgd_size;
 	else
 		table_size = 1UL << data->pg_shift;
 
 	start = ptep;
-	end = (void *)ptep + table_size;
+
+	/* Only leaf entries at the last level */
+	if (lvl == ARM_LPAE_MAX_LEVELS - 1)
+		end = ptep;
+	else
+		end = (void *)ptep + table_size;
 
 	while (ptep != end) {
 		arm_lpae_iopte pte = *ptep++;
@@ -621,6 +639,9 @@ arm_64_lpae_alloc_pgtable_s1(struct io_pgtable_cfg *cfg, void *cookie)
 	}
 
 	reg |= (64ULL - cfg->ias) << ARM_LPAE_TCR_T0SZ_SHIFT;
+
+	/* Disable speculative walks through TTBR1 */
+	reg |= ARM_LPAE_TCR_EPD1;
 	cfg->arm_lpae_s1_cfg.tcr = reg;
 
 	/* MAIRs */

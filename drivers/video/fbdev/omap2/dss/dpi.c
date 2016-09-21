@@ -32,6 +32,7 @@
 #include <linux/string.h>
 #include <linux/of.h>
 #include <linux/clk.h>
+#include <linux/component.h>
 
 #include <video/omapdss.h>
 
@@ -333,7 +334,7 @@ static int dpi_set_dispc_clk(struct dpi_data *dpi, unsigned long pck_req,
 static int dpi_set_mode(struct dpi_data *dpi)
 {
 	struct omap_dss_device *out = &dpi->output;
-	struct omap_overlay_manager *mgr = out->manager;
+	enum omap_channel channel = out->dispc_channel;
 	struct omap_video_timings *t = &dpi->timings;
 	int lck_div = 0, pck_div = 0;
 	unsigned long fck = 0;
@@ -341,7 +342,7 @@ static int dpi_set_mode(struct dpi_data *dpi)
 	int r = 0;
 
 	if (dpi->pll)
-		r = dpi_set_dsi_clk(dpi, mgr->id, t->pixelclock, &fck,
+		r = dpi_set_dsi_clk(dpi, channel, t->pixelclock, &fck,
 				&lck_div, &pck_div);
 	else
 		r = dpi_set_dispc_clk(dpi, t->pixelclock, &fck,
@@ -358,7 +359,7 @@ static int dpi_set_mode(struct dpi_data *dpi)
 		t->pixelclock = pck;
 	}
 
-	dss_mgr_set_timings(mgr, t);
+	dss_mgr_set_timings(channel, t);
 
 	return 0;
 }
@@ -366,7 +367,7 @@ static int dpi_set_mode(struct dpi_data *dpi)
 static void dpi_config_lcd_manager(struct dpi_data *dpi)
 {
 	struct omap_dss_device *out = &dpi->output;
-	struct omap_overlay_manager *mgr = out->manager;
+	enum omap_channel channel = out->dispc_channel;
 
 	dpi->mgr_config.io_pad_mode = DSS_IO_PAD_MODE_BYPASS;
 
@@ -377,13 +378,14 @@ static void dpi_config_lcd_manager(struct dpi_data *dpi)
 
 	dpi->mgr_config.lcden_sig_polarity = 0;
 
-	dss_mgr_set_lcd_config(mgr, &dpi->mgr_config);
+	dss_mgr_set_lcd_config(channel, &dpi->mgr_config);
 }
 
 static int dpi_display_enable(struct omap_dss_device *dssdev)
 {
 	struct dpi_data *dpi = dpi_get_data_from_dssdev(dssdev);
 	struct omap_dss_device *out = &dpi->output;
+	enum omap_channel channel = out->dispc_channel;
 	int r;
 
 	mutex_lock(&dpi->lock);
@@ -394,7 +396,7 @@ static int dpi_display_enable(struct omap_dss_device *dssdev)
 		goto err_no_reg;
 	}
 
-	if (out == NULL || out->manager == NULL) {
+	if (!out->dispc_channel_connected) {
 		DSSERR("failed to enable display: no output/manager\n");
 		r = -ENODEV;
 		goto err_no_out_mgr;
@@ -410,7 +412,7 @@ static int dpi_display_enable(struct omap_dss_device *dssdev)
 	if (r)
 		goto err_get_dispc;
 
-	r = dss_dpi_select_source(out->port_num, out->manager->id);
+	r = dss_dpi_select_source(out->port_num, channel);
 	if (r)
 		goto err_src_sel;
 
@@ -428,7 +430,7 @@ static int dpi_display_enable(struct omap_dss_device *dssdev)
 
 	mdelay(2);
 
-	r = dss_mgr_enable(out->manager);
+	r = dss_mgr_enable(channel);
 	if (r)
 		goto err_mgr_enable;
 
@@ -456,14 +458,14 @@ err_no_reg:
 static void dpi_display_disable(struct omap_dss_device *dssdev)
 {
 	struct dpi_data *dpi = dpi_get_data_from_dssdev(dssdev);
-	struct omap_overlay_manager *mgr = dpi->output.manager;
+	enum omap_channel channel = dpi->output.dispc_channel;
 
 	mutex_lock(&dpi->lock);
 
-	dss_mgr_disable(mgr);
+	dss_mgr_disable(channel);
 
 	if (dpi->pll) {
-		dss_select_lcd_clk_source(mgr->id, OMAP_DSS_CLK_SRC_FCK);
+		dss_select_lcd_clk_source(channel, OMAP_DSS_CLK_SRC_FCK);
 		dss_pll_disable(dpi->pll);
 	}
 
@@ -505,14 +507,17 @@ static int dpi_check_timings(struct omap_dss_device *dssdev,
 			struct omap_video_timings *timings)
 {
 	struct dpi_data *dpi = dpi_get_data_from_dssdev(dssdev);
-	struct omap_overlay_manager *mgr = dpi->output.manager;
+	enum omap_channel channel = dpi->output.dispc_channel;
 	int lck_div, pck_div;
 	unsigned long fck;
 	unsigned long pck;
 	struct dpi_clk_calc_ctx ctx;
 	bool ok;
 
-	if (mgr && !dispc_mgr_timings_ok(mgr->id, timings))
+	if (timings->x_res % 8 != 0)
+		return -EINVAL;
+
+	if (!dispc_mgr_timings_ok(channel, timings))
 		return -EINVAL;
 
 	if (timings->pixelclock == 0)
@@ -659,7 +664,7 @@ static int dpi_connect(struct omap_dss_device *dssdev,
 		struct omap_dss_device *dst)
 {
 	struct dpi_data *dpi = dpi_get_data_from_dssdev(dssdev);
-	struct omap_overlay_manager *mgr;
+	enum omap_channel channel = dpi->output.dispc_channel;
 	int r;
 
 	r = dpi_init_regulator(dpi);
@@ -668,11 +673,7 @@ static int dpi_connect(struct omap_dss_device *dssdev,
 
 	dpi_init_pll(dpi);
 
-	mgr = omap_dss_get_overlay_manager(dssdev->dispc_channel);
-	if (!mgr)
-		return -ENODEV;
-
-	r = dss_mgr_connect(mgr, dssdev);
+	r = dss_mgr_connect(channel, dssdev);
 	if (r)
 		return r;
 
@@ -680,7 +681,7 @@ static int dpi_connect(struct omap_dss_device *dssdev,
 	if (r) {
 		DSSERR("failed to connect output to new device: %s\n",
 				dst->name);
-		dss_mgr_disconnect(mgr, dssdev);
+		dss_mgr_disconnect(channel, dssdev);
 		return r;
 	}
 
@@ -690,6 +691,9 @@ static int dpi_connect(struct omap_dss_device *dssdev,
 static void dpi_disconnect(struct omap_dss_device *dssdev,
 		struct omap_dss_device *dst)
 {
+	struct dpi_data *dpi = dpi_get_data_from_dssdev(dssdev);
+	enum omap_channel channel = dpi->output.dispc_channel;
+
 	WARN_ON(dst != dssdev->dst);
 
 	if (dst != dssdev->dst)
@@ -697,8 +701,7 @@ static void dpi_disconnect(struct omap_dss_device *dssdev,
 
 	omapdss_output_unset_device(dssdev);
 
-	if (dssdev->manager)
-		dss_mgr_disconnect(dssdev->manager, dssdev);
+	dss_mgr_disconnect(channel, dssdev);
 }
 
 static const struct omapdss_dpi_ops dpi_ops = {
@@ -731,7 +734,7 @@ static void dpi_init_output(struct platform_device *pdev)
 	omapdss_register_output(out);
 }
 
-static void __exit dpi_uninit_output(struct platform_device *pdev)
+static void dpi_uninit_output(struct platform_device *pdev)
 {
 	struct dpi_data *dpi = dpi_get_data_from_pdev(pdev);
 	struct omap_dss_device *out = &dpi->output;
@@ -775,7 +778,7 @@ static void dpi_init_output_port(struct platform_device *pdev,
 	omapdss_register_output(out);
 }
 
-static void __exit dpi_uninit_output_port(struct device_node *port)
+static void dpi_uninit_output_port(struct device_node *port)
 {
 	struct dpi_data *dpi = port->data;
 	struct omap_dss_device *out = &dpi->output;
@@ -783,8 +786,9 @@ static void __exit dpi_uninit_output_port(struct device_node *port)
 	omapdss_unregister_output(out);
 }
 
-static int omap_dpi_probe(struct platform_device *pdev)
+static int dpi_bind(struct device *dev, struct device *master, void *data)
 {
+	struct platform_device *pdev = to_platform_device(dev);
 	struct dpi_data *dpi;
 
 	dpi = devm_kzalloc(&pdev->dev, sizeof(*dpi), GFP_KERNEL);
@@ -802,16 +806,32 @@ static int omap_dpi_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static int __exit omap_dpi_remove(struct platform_device *pdev)
+static void dpi_unbind(struct device *dev, struct device *master, void *data)
 {
-	dpi_uninit_output(pdev);
+	struct platform_device *pdev = to_platform_device(dev);
 
+	dpi_uninit_output(pdev);
+}
+
+static const struct component_ops dpi_component_ops = {
+	.bind	= dpi_bind,
+	.unbind	= dpi_unbind,
+};
+
+static int dpi_probe(struct platform_device *pdev)
+{
+	return component_add(&pdev->dev, &dpi_component_ops);
+}
+
+static int dpi_remove(struct platform_device *pdev)
+{
+	component_del(&pdev->dev, &dpi_component_ops);
 	return 0;
 }
 
 static struct platform_driver omap_dpi_driver = {
-	.probe		= omap_dpi_probe,
-	.remove         = __exit_p(omap_dpi_remove),
+	.probe		= dpi_probe,
+	.remove		= dpi_remove,
 	.driver         = {
 		.name   = "omapdss_dpi",
 		.suppress_bind_attrs = true,
@@ -823,12 +843,12 @@ int __init dpi_init_platform_driver(void)
 	return platform_driver_register(&omap_dpi_driver);
 }
 
-void __exit dpi_uninit_platform_driver(void)
+void dpi_uninit_platform_driver(void)
 {
 	platform_driver_unregister(&omap_dpi_driver);
 }
 
-int __init dpi_init_port(struct platform_device *pdev, struct device_node *port)
+int dpi_init_port(struct platform_device *pdev, struct device_node *port)
 {
 	struct dpi_data *dpi;
 	struct device_node *ep;
@@ -870,7 +890,7 @@ err_datalines:
 	return r;
 }
 
-void __exit dpi_uninit_port(struct device_node *port)
+void dpi_uninit_port(struct device_node *port)
 {
 	struct dpi_data *dpi = port->data;
 

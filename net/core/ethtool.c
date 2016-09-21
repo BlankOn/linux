@@ -790,7 +790,7 @@ static noinline_for_stack int ethtool_set_rxfh(struct net_device *dev,
 	if (ops->get_rxfh_indir_size)
 		dev_indir_size = ops->get_rxfh_indir_size(dev);
 	if (ops->get_rxfh_key_size)
-		dev_key_size = dev->ethtool_ops->get_rxfh_key_size(dev);
+		dev_key_size = ops->get_rxfh_key_size(dev);
 
 	if (copy_from_user(&rxfh, useraddr, sizeof(rxfh)))
 		return -EFAULT;
@@ -1273,7 +1273,7 @@ static int ethtool_get_strings(struct net_device *dev, void __user *useraddr)
 
 	gstrings.len = ret;
 
-	data = kmalloc(gstrings.len * ETH_GSTRING_LEN, GFP_USER);
+	data = kcalloc(gstrings.len, ETH_GSTRING_LEN, GFP_USER);
 	if (!data)
 		return -ENOMEM;
 

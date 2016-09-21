@@ -31,7 +31,6 @@
 #include <linux/security.h>
 #include <linux/compat.h>
 #include <linux/fs_stack.h>
-#include <linux/aio.h>
 #include "ecryptfs_kernel.h"
 
 /**
@@ -52,12 +51,6 @@ static ssize_t ecryptfs_read_update_atime(struct kiocb *iocb,
 	struct file *file = iocb->ki_filp;
 
 	rc = generic_file_read_iter(iocb, to);
-	/*
-	 * Even though this is a async interface, we need to wait
-	 * for IO to finish to update atime
-	 */
-	if (-EIOCBQUEUED == rc)
-		rc = wait_on_sync_kiocb(iocb);
 	if (rc >= 0) {
 		path = ecryptfs_dentry_to_lower_path(file->f_path.dentry);
 		touch_atime(path);
@@ -137,7 +130,7 @@ struct kmem_cache *ecryptfs_file_info_cache;
 
 static int read_or_initialize_metadata(struct dentry *dentry)
 {
-	struct inode *inode = dentry->d_inode;
+	struct inode *inode = d_inode(dentry);
 	struct ecryptfs_mount_crypt_stat *mount_crypt_stat;
 	struct ecryptfs_crypt_stat *crypt_stat;
 	int rc;
@@ -175,6 +168,19 @@ static int read_or_initialize_metadata(struct dentry *dentry)
 out:
 	mutex_unlock(&crypt_stat->cs_mutex);
 	return rc;
+}
+
+static int ecryptfs_mmap(struct file *file, struct vm_area_struct *vma)
+{
+	struct file *lower_file = ecryptfs_file_to_lower(file);
+	/*
+	 * Don't allow mmap on top of file systems that don't support it
+	 * natively.  If FILESYSTEM_MAX_STACK_DEPTH > 2 or ecryptfs
+	 * allows recursive mounting, this will need to be extended.
+	 */
+	if (!lower_file->f_op->mmap)
+		return -ENODEV;
+	return generic_file_mmap(file, vma);
 }
 
 /**
@@ -365,16 +371,14 @@ const struct file_operations ecryptfs_dir_fops = {
 
 const struct file_operations ecryptfs_main_fops = {
 	.llseek = generic_file_llseek,
-	.read = new_sync_read,
 	.read_iter = ecryptfs_read_update_atime,
-	.write = new_sync_write,
 	.write_iter = generic_file_write_iter,
 	.iterate = ecryptfs_readdir,
 	.unlocked_ioctl = ecryptfs_unlocked_ioctl,
 #ifdef CONFIG_COMPAT
 	.compat_ioctl = ecryptfs_compat_ioctl,
 #endif
-	.mmap = generic_file_mmap,
+	.mmap = ecryptfs_mmap,
 	.open = ecryptfs_open,
 	.flush = ecryptfs_flush,
 	.release = ecryptfs_release,

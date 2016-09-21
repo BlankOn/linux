@@ -130,7 +130,7 @@ static int msg_thread_exits(struct fsg_common *common)
 	return 0;
 }
 
-static int __init msg_do_config(struct usb_configuration *c)
+static int msg_do_config(struct usb_configuration *c)
 {
 	struct fsg_opts *opts;
 	int ret;
@@ -145,10 +145,6 @@ static int __init msg_do_config(struct usb_configuration *c)
 	f_msg = usb_get_function(fi_msg);
 	if (IS_ERR(f_msg))
 		return PTR_ERR(f_msg);
-
-	ret = fsg_common_run_thread(opts->common);
-	if (ret)
-		goto put_func;
 
 	ret = usb_add_function(c, f_msg);
 	if (ret)
@@ -170,7 +166,7 @@ static struct usb_configuration msg_config_driver = {
 
 /****************************** Gadget Bind ******************************/
 
-static int __init msg_bind(struct usb_composite_dev *cdev)
+static int msg_bind(struct usb_composite_dev *cdev)
 {
 	static const struct fsg_operations ops = {
 		.thread_exits = msg_thread_exits,
@@ -190,10 +186,6 @@ static int __init msg_bind(struct usb_composite_dev *cdev)
 	status = fsg_common_set_num_buffers(opts->common, fsg_num_buffers);
 	if (status)
 		goto fail;
-
-	status = fsg_common_set_nluns(opts->common, config.nluns);
-	if (status)
-		goto fail_set_nluns;
 
 	fsg_common_set_ops(opts->common, &ops);
 
@@ -227,8 +219,6 @@ static int __init msg_bind(struct usb_composite_dev *cdev)
 fail_string_ids:
 	fsg_common_remove_luns(opts->common);
 fail_set_cdev:
-	fsg_common_free_luns(opts->common);
-fail_set_nluns:
 	fsg_common_free_buffers(opts->common);
 fail:
 	usb_put_function_instance(fi_msg);
@@ -248,7 +238,7 @@ static int msg_unbind(struct usb_composite_dev *cdev)
 
 /****************************** Some noise ******************************/
 
-static __refdata struct usb_composite_driver msg_driver = {
+static struct usb_composite_driver msg_driver = {
 	.name		= "g_mass_storage",
 	.dev		= &msg_device_desc,
 	.max_speed	= USB_SPEED_SUPER,

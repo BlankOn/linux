@@ -17,7 +17,7 @@
 struct bpf_htab {
 	struct bpf_map map;
 	struct hlist_head *buckets;
-	spinlock_t lock;
+	raw_spinlock_t lock;
 	u32 count;	/* number of elements in this hashtable */
 	u32 n_buckets;	/* number of hash buckets */
 	u32 elem_size;	/* size of each element in bytes */
@@ -82,7 +82,7 @@ static struct bpf_map *htab_map_alloc(union bpf_attr *attr)
 	for (i = 0; i < htab->n_buckets; i++)
 		INIT_HLIST_HEAD(&htab->buckets[i]);
 
-	spin_lock_init(&htab->lock);
+	raw_spin_lock_init(&htab->lock);
 	htab->count = 0;
 
 	htab->elem_size = sizeof(struct htab_elem) +
@@ -230,7 +230,7 @@ static int htab_map_update_elem(struct bpf_map *map, void *key, void *value,
 	l_new->hash = htab_map_hash(l_new->key, key_size);
 
 	/* bpf_map_update_elem() can be called in_irq() */
-	spin_lock_irqsave(&htab->lock, flags);
+	raw_spin_lock_irqsave(&htab->lock, flags);
 
 	head = select_bucket(htab, l_new->hash);
 
@@ -266,11 +266,11 @@ static int htab_map_update_elem(struct bpf_map *map, void *key, void *value,
 	} else {
 		htab->count++;
 	}
-	spin_unlock_irqrestore(&htab->lock, flags);
+	raw_spin_unlock_irqrestore(&htab->lock, flags);
 
 	return 0;
 err:
-	spin_unlock_irqrestore(&htab->lock, flags);
+	raw_spin_unlock_irqrestore(&htab->lock, flags);
 	kfree(l_new);
 	return ret;
 }
@@ -291,7 +291,7 @@ static int htab_map_delete_elem(struct bpf_map *map, void *key)
 
 	hash = htab_map_hash(key, key_size);
 
-	spin_lock_irqsave(&htab->lock, flags);
+	raw_spin_lock_irqsave(&htab->lock, flags);
 
 	head = select_bucket(htab, hash);
 
@@ -304,7 +304,7 @@ static int htab_map_delete_elem(struct bpf_map *map, void *key)
 		ret = 0;
 	}
 
-	spin_unlock_irqrestore(&htab->lock, flags);
+	raw_spin_unlock_irqrestore(&htab->lock, flags);
 	return ret;
 }
 
@@ -345,7 +345,7 @@ static void htab_map_free(struct bpf_map *map)
 	kfree(htab);
 }
 
-static struct bpf_map_ops htab_ops = {
+static const struct bpf_map_ops htab_ops = {
 	.map_alloc = htab_map_alloc,
 	.map_free = htab_map_free,
 	.map_get_next_key = htab_map_get_next_key,
@@ -354,14 +354,14 @@ static struct bpf_map_ops htab_ops = {
 	.map_delete_elem = htab_map_delete_elem,
 };
 
-static struct bpf_map_type_list tl = {
+static struct bpf_map_type_list htab_type __read_mostly = {
 	.ops = &htab_ops,
 	.type = BPF_MAP_TYPE_HASH,
 };
 
 static int __init register_htab_map(void)
 {
-	bpf_register_map_type(&tl);
+	bpf_register_map_type(&htab_type);
 	return 0;
 }
 late_initcall(register_htab_map);

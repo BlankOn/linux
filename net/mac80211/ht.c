@@ -252,8 +252,6 @@ bool ieee80211_ht_cap_ie_to_sta_ht_cap(struct ieee80211_sub_if_data *sdata,
 		break;
 	}
 
-	if (bw != sta->sta.bandwidth)
-		changed = true;
 	sta->sta.bandwidth = bw;
 
 	sta->cur_max_bandwidth =
@@ -302,6 +300,7 @@ void ieee80211_ba_session_work(struct work_struct *work)
 	struct sta_info *sta =
 		container_of(work, struct sta_info, ampdu_mlme.work);
 	struct tid_ampdu_tx *tid_tx;
+	struct tid_ampdu_rx *tid_rx;
 	int tid;
 
 	/*
@@ -325,6 +324,24 @@ void ieee80211_ba_session_work(struct work_struct *work)
 			___ieee80211_stop_rx_ba_session(
 				sta, tid, WLAN_BACK_RECIPIENT,
 				WLAN_REASON_UNSPECIFIED, true);
+
+		/*
+		 * Stop RX BA sessions affected by change of
+		 * sta.max_rx_aggregation_subframe
+		 */
+		tid_rx = sta->ampdu_mlme.tid_rx[tid];
+		if (tid_rx &&
+		    tid_rx->buf_size > sta->sta.max_rx_aggregation_subframes) {
+			ht_dbg(sta->sdata,
+			  "buf_size(%d) > max_subframes(%d) stopping tid %d\n",
+			  tid_rx->buf_size,
+			  sta->sta.max_rx_aggregation_subframes,
+			  tid);
+
+			___ieee80211_stop_rx_ba_session(
+				sta, tid, WLAN_BACK_RECIPIENT,
+				WLAN_REASON_UNSPECIFIED, true);
+		}
 
 		spin_lock_bh(&sta->lock);
 

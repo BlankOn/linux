@@ -115,9 +115,11 @@ int no_printk(const char *fmt, ...)
 #ifdef CONFIG_EARLY_PRINTK
 extern asmlinkage __printf(1, 2)
 void early_printk(const char *fmt, ...);
+extern void printk_kill(void);
 #else
 static inline __printf(1, 2) __cold
 void early_printk(const char *s, ...) { }
+static inline void printk_kill(void) { }
 #endif
 
 typedef int(*printk_func_t)(const char *fmt, va_list args);
@@ -255,6 +257,11 @@ extern asmlinkage void dump_stack(void) __cold;
 	printk(KERN_NOTICE pr_fmt(fmt), ##__VA_ARGS__)
 #define pr_info(fmt, ...) \
 	printk(KERN_INFO pr_fmt(fmt), ##__VA_ARGS__)
+/*
+ * Like KERN_CONT, pr_cont() should only be used when continuing
+ * a line with no newline ('\n') enclosed. Otherwise it defaults
+ * back to KERN_DEFAULT.
+ */
 #define pr_cont(fmt, ...) \
 	printk(KERN_CONT fmt, ##__VA_ARGS__)
 

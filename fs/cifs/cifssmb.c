@@ -1395,11 +1395,10 @@ openRetry:
  * current bigbuf.
  */
 static int
-cifs_readv_discard(struct TCP_Server_Info *server, struct mid_q_entry *mid)
+discard_remaining_data(struct TCP_Server_Info *server)
 {
 	unsigned int rfclen = get_rfc1002_length(server->smallbuf);
 	int remaining = rfclen + 4 - server->total_read;
-	struct cifs_readdata *rdata = mid->callback_data;
 
 	while (remaining > 0) {
 		int length;
@@ -1413,8 +1412,18 @@ cifs_readv_discard(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 		remaining -= length;
 	}
 
-	dequeue_mid(mid, rdata->result);
 	return 0;
+}
+
+static int
+cifs_readv_discard(struct TCP_Server_Info *server, struct mid_q_entry *mid)
+{
+	int length;
+	struct cifs_readdata *rdata = mid->callback_data;
+
+	length = discard_remaining_data(server);
+	dequeue_mid(mid, rdata->result);
+	return length;
 }
 
 int
@@ -1444,6 +1453,12 @@ cifs_readv_receive(struct TCP_Server_Info *server, struct mid_q_entry *mid)
 	if (length < 0)
 		return length;
 	server->total_read += length;
+
+	if (server->ops->is_status_pending &&
+	    server->ops->is_status_pending(buf, server, 0)) {
+		discard_remaining_data(server);
+		return -1;
+	}
 
 	/* Was the SMB read successful? */
 	rdata->result = server->ops->map_error(buf, false);
@@ -1898,7 +1913,7 @@ static void
 cifs_writev_requeue(struct cifs_writedata *wdata)
 {
 	int i, rc = 0;
-	struct inode *inode = wdata->cfile->dentry->d_inode;
+	struct inode *inode = d_inode(wdata->cfile->dentry);
 	struct TCP_Server_Info *server;
 	unsigned int rest_len;
 
@@ -1981,7 +1996,7 @@ cifs_writev_complete(struct work_struct *work)
 {
 	struct cifs_writedata *wdata = container_of(work,
 						struct cifs_writedata, work);
-	struct inode *inode = wdata->cfile->dentry->d_inode;
+	struct inode *inode = d_inode(wdata->cfile->dentry);
 	int i = 0;
 
 	if (wdata->result == 0) {
@@ -2784,7 +2799,7 @@ copyRetry:
 int
 CIFSUnixCreateSymLink(const unsigned int xid, struct cifs_tcon *tcon,
 		      const char *fromName, const char *toName,
-		      const struct nls_table *nls_codepage)
+		      const struct nls_table *nls_codepage, int remap)
 {
 	TRANSACTION2_SPI_REQ *pSMB = NULL;
 	TRANSACTION2_SPI_RSP *pSMBr = NULL;
@@ -2804,9 +2819,9 @@ createSymLinkRetry:
 
 	if (pSMB->hdr.Flags2 & SMBFLG2_UNICODE) {
 		name_len =
-		    cifs_strtoUTF16((__le16 *) pSMB->FileName, fromName,
-				    /* find define for this maxpathcomponent */
-				    PATH_MAX, nls_codepage);
+		    cifsConvertToUTF16((__le16 *) pSMB->FileName, fromName,
+				/* find define for this maxpathcomponent */
+					PATH_MAX, nls_codepage, remap);
 		name_len++;	/* trailing null */
 		name_len *= 2;
 
@@ -2828,9 +2843,9 @@ createSymLinkRetry:
 	data_offset = (char *) (&pSMB->hdr.Protocol) + offset;
 	if (pSMB->hdr.Flags2 & SMBFLG2_UNICODE) {
 		name_len_target =
-		    cifs_strtoUTF16((__le16 *) data_offset, toName, PATH_MAX
-				    /* find define for this maxpathcomponent */
-				    , nls_codepage);
+		    cifsConvertToUTF16((__le16 *) data_offset, toName,
+				/* find define for this maxpathcomponent */
+					PATH_MAX, nls_codepage, remap);
 		name_len_target++;	/* trailing null */
 		name_len_target *= 2;
 	} else {	/* BB improve the check for buffer overruns BB */
@@ -3034,7 +3049,7 @@ winCreateHardLinkRetry:
 int
 CIFSSMBUnixQuerySymLink(const unsigned int xid, struct cifs_tcon *tcon,
 			const unsigned char *searchName, char **symlinkinfo,
-			const struct nls_table *nls_codepage)
+			const struct nls_table *nls_codepage, int remap)
 {
 /* SMB_QUERY_FILE_UNIX_LINK */
 	TRANSACTION2_QPI_REQ *pSMB = NULL;
@@ -3055,8 +3070,9 @@ querySymLinkRetry:
 
 	if (pSMB->hdr.Flags2 & SMBFLG2_UNICODE) {
 		name_len =
-			cifs_strtoUTF16((__le16 *) pSMB->FileName, searchName,
-					PATH_MAX, nls_codepage);
+			cifsConvertToUTF16((__le16 *) pSMB->FileName,
+					   searchName, PATH_MAX, nls_codepage,
+					   remap);
 		name_len++;	/* trailing null */
 		name_len *= 2;
 	} else {	/* BB improve the check for buffer overruns BB */
@@ -4917,7 +4933,7 @@ getDFSRetry:
 		strncpy(pSMB->RequestFileName, search_name, name_len);
 	}
 
-	if (ses->server && ses->server->sign)
+	if (ses->server->sign)
 		pSMB->hdr.Flags2 |= SMBFLG2_SECURITY_SIGNATURE;
 
 	pSMB->hdr.Uid = ses->Suid;

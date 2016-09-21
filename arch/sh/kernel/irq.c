@@ -124,7 +124,6 @@ void irq_ctx_init(int cpu)
 
 	irqctx = (union irq_ctx *)&hardirq_stack[cpu * THREAD_SIZE];
 	irqctx->tinfo.task		= NULL;
-	irqctx->tinfo.exec_domain	= NULL;
 	irqctx->tinfo.cpu		= cpu;
 	irqctx->tinfo.preempt_count	= HARDIRQ_OFFSET;
 	irqctx->tinfo.addr_limit	= MAKE_MM_SEG(0);
@@ -133,7 +132,6 @@ void irq_ctx_init(int cpu)
 
 	irqctx = (union irq_ctx *)&softirq_stack[cpu * THREAD_SIZE];
 	irqctx->tinfo.task		= NULL;
-	irqctx->tinfo.exec_domain	= NULL;
 	irqctx->tinfo.cpu		= cpu;
 	irqctx->tinfo.preempt_count	= 0;
 	irqctx->tinfo.addr_limit	= MAKE_MM_SEG(0);
@@ -149,6 +147,7 @@ void irq_ctx_exit(int cpu)
 	hardirq_ctx[cpu] = NULL;
 }
 
+#ifndef CONFIG_PREEMPT_RT_FULL
 void do_softirq_own_stack(void)
 {
 	struct thread_info *curctx;
@@ -176,6 +175,7 @@ void do_softirq_own_stack(void)
 		  "r5", "r6", "r7", "r8", "r9", "r15", "t", "pr"
 	);
 }
+#endif
 #else
 static inline void handle_one_irq(unsigned int irq)
 {

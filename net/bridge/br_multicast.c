@@ -814,7 +814,8 @@ static void __br_multicast_send_query(struct net_bridge *br,
 
 	if (port) {
 		skb->dev = port->dev;
-		NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_OUT, skb, NULL, skb->dev,
+		NF_HOOK(NFPROTO_BRIDGE, NF_BR_LOCAL_OUT, NULL, skb,
+			NULL, skb->dev,
 			br_dev_queue_push_xmit);
 	} else {
 		br_multicast_select_own_querier(br, ip, skb);
@@ -979,7 +980,7 @@ static int br_ip4_multicast_igmp3_report(struct net_bridge *br,
 
 	ih = igmpv3_report_hdr(skb);
 	num = ntohs(ih->ngrec);
-	len = sizeof(*ih);
+	len = skb_transport_offset(skb) + sizeof(*ih);
 
 	for (i = 0; i < num; i++) {
 		len += sizeof(*grec);
@@ -1034,7 +1035,7 @@ static int br_ip6_multicast_mld2_report(struct net_bridge *br,
 
 	icmp6h = icmp6_hdr(skb);
 	num = ntohs(icmp6h->icmp6_dataun.un_data16[1]);
-	len = sizeof(*icmp6h);
+	len = skb_transport_offset(skb) + sizeof(*icmp6h);
 
 	for (i = 0; i < num; i++) {
 		__be16 *nsrcs, _nsrcs;
@@ -1071,7 +1072,7 @@ static int br_ip6_multicast_mld2_report(struct net_bridge *br,
 
 		err = br_ip6_multicast_add_group(br, port, &grec->grec_mca,
 						 vid);
-		if (!err)
+		if (err)
 			break;
 	}
 
@@ -1166,6 +1167,9 @@ static void br_multicast_add_router(struct net_bridge *br,
 	struct net_bridge_port *p;
 	struct hlist_node *slot = NULL;
 
+	if (!hlist_unhashed(&port->rlist))
+		return;
+
 	hlist_for_each_entry(p, &br->router_list, rlist) {
 		if ((unsigned long) port >= (unsigned long) p)
 			break;
@@ -1193,12 +1197,8 @@ static void br_multicast_mark_router(struct net_bridge *br,
 	if (port->multicast_router != 1)
 		return;
 
-	if (!hlist_unhashed(&port->rlist))
-		goto timer;
-
 	br_multicast_add_router(br, port);
 
-timer:
 	mod_timer(&port->multicast_router_timer,
 		  now + br->multicast_querier_interval);
 }
@@ -1821,7 +1821,7 @@ static void br_multicast_query_expired(struct net_bridge *br,
 	if (query->startup_sent < br->multicast_startup_query_count)
 		query->startup_sent++;
 
-	RCU_INIT_POINTER(querier, NULL);
+	RCU_INIT_POINTER(querier->port, NULL);
 	br_multicast_send_query(br, NULL, query);
 	spin_unlock(&br->multicast_lock);
 }

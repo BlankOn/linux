@@ -352,16 +352,12 @@ static void vpfe_ccdc_setwin(struct vpfe_ccdc *ccdc,
 	vert_start = image_win->top;
 
 	if (frm_fmt == CCDC_FRMFMT_INTERLACED) {
-		vert_nr_lines = (image_win->height >> 1) - 1;
+		vert_nr_lines = (image_win->height >> 1);
 		vert_start >>= 1;
-		/* Since first line doesn't have any data */
-		vert_start += 1;
 		/* configure VDINT0 */
 		val = (vert_start << VPFE_VDINT_VDINT0_SHIFT);
 	} else {
-		/* Since first line doesn't have any data */
-		vert_start += 1;
-		vert_nr_lines = image_win->height - 1;
+		vert_nr_lines = image_win->height;
 		/*
 		 * configure VDINT0 and VDINT1. VDINT1 will be at half
 		 * of image height
@@ -1185,13 +1181,23 @@ static int vpfe_initialize_device(struct vpfe_device *vpfe)
 static int vpfe_release(struct file *file)
 {
 	struct vpfe_device *vpfe = video_drvdata(file);
+	bool fh_singular;
 	int ret;
 
 	mutex_lock(&vpfe->lock);
 
-	if (v4l2_fh_is_singular_file(file))
-		vpfe_ccdc_close(&vpfe->ccdc, vpfe->pdev);
+	/* Save the singular status before we call the clean-up helper */
+	fh_singular = v4l2_fh_is_singular_file(file);
+
+	/* the release helper will cleanup any on-going streaming */
 	ret = _vb2_fop_release(file, NULL);
+
+	/*
+	 * If this was the last open file.
+	 * Then de-initialize hw module.
+	 */
+	if (fh_singular)
+		vpfe_ccdc_close(&vpfe->ccdc, vpfe->pdev);
 
 	mutex_unlock(&vpfe->lock);
 
@@ -1577,10 +1583,9 @@ static int vpfe_s_fmt(struct file *file, void *priv,
 		return -EBUSY;
 	}
 
-	ret = vpfe_try_fmt(file, priv, fmt);
+	ret = __vpfe_get_format(vpfe, &format, &bpp);
 	if (ret)
 		return ret;
-
 
 	if (!cmp_v4l2_format(fmt, &format)) {
 		/* Sensor format is different from the requested format
@@ -1645,6 +1650,7 @@ static int vpfe_enum_size(struct file *file, void  *priv,
 	fse.index = fsize->index;
 	fse.pad = 0;
 	fse.code = mbus.code;
+	fse.which = V4L2_SUBDEV_FORMAT_ACTIVE;
 	ret = v4l2_subdev_call(sdinfo->sd, pad, enum_frame_size, NULL, &fse);
 	if (ret)
 		return -EINVAL;
@@ -1700,11 +1706,16 @@ static int vpfe_get_app_input_index(struct vpfe_device *vpfe,
 {
 	struct vpfe_config *cfg = vpfe->cfg;
 	struct vpfe_subdev_info *sdinfo;
+	struct i2c_client *client;
+	struct i2c_client *curr_client;
 	int i, j = 0;
 
+	curr_client = v4l2_get_subdevdata(vpfe->current_subdev->sd);
 	for (i = 0; i < ARRAY_SIZE(vpfe->cfg->asd); i++) {
 		sdinfo = &cfg->sub_devs[i];
-		if (!strcmp(sdinfo->name, vpfe->current_subdev->name)) {
+		client = v4l2_get_subdevdata(sdinfo->sd);
+		if (client->addr == curr_client->addr &&
+		    client->adapter->nr == client->adapter->nr) {
 			if (vpfe->current_input >= 1)
 				return -1;
 			*app_input_index = j + vpfe->current_input;
@@ -2296,20 +2307,10 @@ vpfe_async_bound(struct v4l2_async_notifier *notifier,
 	vpfe_dbg(1, vpfe, "vpfe_async_bound\n");
 
 	for (i = 0; i < ARRAY_SIZE(vpfe->cfg->asd); i++) {
-		sdinfo = &vpfe->cfg->sub_devs[i];
-
-		if (!strcmp(sdinfo->name, subdev->name)) {
+		if (vpfe->cfg->asd[i]->match.of.node == asd[i].match.of.node) {
+			sdinfo = &vpfe->cfg->sub_devs[i];
 			vpfe->sd[i] = subdev;
-			vpfe_info(vpfe,
-				 "v4l2 sub device %s registered\n",
-				 subdev->name);
-			vpfe->sd[i]->grp_id =
-					sdinfo->grp_id;
-			/* update tvnorms from the sub devices */
-			for (j = 0; j < 1; j++)
-				vpfe->video_dev->tvnorms |=
-					sdinfo->inputs[j].std;
-
+			vpfe->sd[i]->grp_id = sdinfo->grp_id;
 			found = true;
 			break;
 		}
@@ -2320,6 +2321,8 @@ vpfe_async_bound(struct v4l2_async_notifier *notifier,
 		return -EINVAL;
 	}
 
+	vpfe->video_dev.tvnorms |= sdinfo->inputs[0].std;
+
 	/* setup the supported formats & indexes */
 	for (j = 0, i = 0; ; ++j) {
 		struct vpfe_fmt *fmt;
@@ -2327,6 +2330,7 @@ vpfe_async_bound(struct v4l2_async_notifier *notifier,
 
 		memset(&mbus_code, 0, sizeof(mbus_code));
 		mbus_code.index = j;
+		mbus_code.which = V4L2_SUBDEV_FORMAT_ACTIVE;
 		ret = v4l2_subdev_call(subdev, pad, enum_mbus_code,
 			       NULL, &mbus_code);
 		if (ret)
@@ -2390,9 +2394,9 @@ static int vpfe_probe_complete(struct vpfe_device *vpfe)
 
 	INIT_LIST_HEAD(&vpfe->dma_queue);
 
-	vdev = vpfe->video_dev;
+	vdev = &vpfe->video_dev;
 	strlcpy(vdev->name, VPFE_MODULE_NAME, sizeof(vdev->name));
-	vdev->release = video_device_release;
+	vdev->release = video_device_release_empty;
 	vdev->fops = &vpfe_fops;
 	vdev->ioctl_ops = &vpfe_ioctl_ops;
 	vdev->v4l2_dev = &vpfe->v4l2_dev;
@@ -2400,7 +2404,7 @@ static int vpfe_probe_complete(struct vpfe_device *vpfe)
 	vdev->queue = q;
 	vdev->lock = &vpfe->lock;
 	video_set_drvdata(vdev, vpfe);
-	err = video_register_device(vpfe->video_dev, VFL_TYPE_GRABBER, -1);
+	err = video_register_device(&vpfe->video_dev, VFL_TYPE_GRABBER, -1);
 	if (err) {
 		vpfe_err(vpfe,
 			"Unable to register video device.\n");
@@ -2425,7 +2429,7 @@ static int vpfe_async_complete(struct v4l2_async_notifier *notifier)
 static struct vpfe_config *
 vpfe_get_pdata(struct platform_device *pdev)
 {
-	struct device_node *endpoint = NULL, *rem = NULL;
+	struct device_node *endpoint = NULL;
 	struct v4l2_of_endpoint bus_cfg;
 	struct vpfe_subdev_info *sdinfo;
 	struct vpfe_config *pdata;
@@ -2443,6 +2447,8 @@ vpfe_get_pdata(struct platform_device *pdev)
 		return NULL;
 
 	for (i = 0; ; i++) {
+		struct device_node *rem;
+
 		endpoint = of_graph_get_next_endpoint(pdev->dev.of_node,
 						      endpoint);
 		if (!endpoint)
@@ -2497,14 +2503,17 @@ vpfe_get_pdata(struct platform_device *pdev)
 			goto done;
 		}
 
-		strncpy(sdinfo->name, rem->name, sizeof(sdinfo->name));
-
 		pdata->asd[i] = devm_kzalloc(&pdev->dev,
 					     sizeof(struct v4l2_async_subdev),
 					     GFP_KERNEL);
+		if (!pdata->asd[i]) {
+			of_node_put(rem);
+			pdata = NULL;
+			goto done;
+		}
+
 		pdata->asd[i]->match_type = V4L2_ASYNC_MATCH_OF;
 		pdata->asd[i]->match.of.node = rem;
-		of_node_put(endpoint);
 		of_node_put(rem);
 	}
 
@@ -2513,7 +2522,6 @@ vpfe_get_pdata(struct platform_device *pdev)
 
 done:
 	of_node_put(endpoint);
-	of_node_put(rem);
 	return NULL;
 }
 
@@ -2561,17 +2569,11 @@ static int vpfe_probe(struct platform_device *pdev)
 		return -EINVAL;
 	}
 
-	vpfe->video_dev = video_device_alloc();
-	if (!vpfe->video_dev) {
-		dev_err(&pdev->dev, "Unable to allocate video device\n");
-		return -ENOMEM;
-	}
-
 	ret = v4l2_device_register(&pdev->dev, &vpfe->v4l2_dev);
 	if (ret) {
 		vpfe_err(vpfe,
 			"Unable to register v4l2 device.\n");
-		goto probe_out_video_release;
+		return ret;
 	}
 
 	/* set the driver data in platform device */
@@ -2609,9 +2611,6 @@ static int vpfe_probe(struct platform_device *pdev)
 
 probe_out_v4l2_unregister:
 	v4l2_device_unregister(&vpfe->v4l2_dev);
-probe_out_video_release:
-	if (!video_is_registered(vpfe->video_dev))
-		video_device_release(vpfe->video_dev);
 	return ret;
 }
 
@@ -2628,7 +2627,7 @@ static int vpfe_remove(struct platform_device *pdev)
 
 	v4l2_async_notifier_unregister(&vpfe->notifier);
 	v4l2_device_unregister(&vpfe->v4l2_dev);
-	video_unregister_device(vpfe->video_dev);
+	video_unregister_device(&vpfe->video_dev);
 
 	return 0;
 }
@@ -2670,22 +2669,22 @@ static int vpfe_suspend(struct device *dev)
 	struct vpfe_device *vpfe = platform_get_drvdata(pdev);
 	struct vpfe_ccdc *ccdc = &vpfe->ccdc;
 
-	/* if streaming has not started we don't care */
-	if (!vb2_start_streaming_called(&vpfe->buffer_queue))
-		return 0;
+	/* only do full suspend if streaming has started */
+	if (vb2_start_streaming_called(&vpfe->buffer_queue)) {
 
-	pm_runtime_get_sync(dev);
-	vpfe_config_enable(ccdc, 1);
+		pm_runtime_get_sync(dev);
+		vpfe_config_enable(ccdc, 1);
 
-	/* Save VPFE context */
-	vpfe_save_context(ccdc);
+		/* Save VPFE context */
+		vpfe_save_context(ccdc);
 
-	/* Disable CCDC */
-	vpfe_pcr_enable(ccdc, 0);
-	vpfe_config_enable(ccdc, 0);
+		/* Disable CCDC */
+		vpfe_pcr_enable(ccdc, 0);
+		vpfe_config_enable(ccdc, 0);
 
-	/* Disable both master and slave clock */
-	pm_runtime_put_sync(dev);
+		/* Disable both master and slave clock */
+		pm_runtime_put_sync(dev);
+	}
 
 	/* Select sleep pin state */
 	pinctrl_pm_select_sleep_state(dev);
@@ -2728,19 +2727,19 @@ static int vpfe_resume(struct device *dev)
 	struct vpfe_device *vpfe = platform_get_drvdata(pdev);
 	struct vpfe_ccdc *ccdc = &vpfe->ccdc;
 
-	/* if streaming has not started we don't care */
-	if (!vb2_start_streaming_called(&vpfe->buffer_queue))
-		return 0;
+	/* only do full resume if streaming has started */
+	if (vb2_start_streaming_called(&vpfe->buffer_queue)) {
 
-	/* Enable both master and slave clock */
-	pm_runtime_get_sync(dev);
-	vpfe_config_enable(ccdc, 1);
+		/* Enable both master and slave clock */
+		pm_runtime_get_sync(dev);
+		vpfe_config_enable(ccdc, 1);
 
-	/* Restore VPFE context */
-	vpfe_restore_context(ccdc);
+		/* Restore VPFE context */
+		vpfe_restore_context(ccdc);
 
-	vpfe_config_enable(ccdc, 0);
-	pm_runtime_put_sync(dev);
+		vpfe_config_enable(ccdc, 0);
+		pm_runtime_put_sync(dev);
+	}
 
 	/* Select default pin state */
 	pinctrl_pm_select_default_state(dev);

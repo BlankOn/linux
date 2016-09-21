@@ -15,6 +15,7 @@
 
 #include "am33xx.dtsi"
 #include <dt-bindings/pwm/pwm.h>
+#include <dt-bindings/interrupt-controller/irq.h>
 
 / {
 	model = "TI AM335x EVM-SK";
@@ -187,7 +188,13 @@
 
 &am33xx_pinmux {
 	pinctrl-names = "default";
-	pinctrl-0 = <&gpio_keys_s0 &clkout2_pin>;
+	pinctrl-0 = <&gpio_keys_s0 &clkout2_pin &ddr3_vtt_toggle>;
+
+	ddr3_vtt_toggle: ddr3_vtt_toggle {
+		pinctrl-single,pins = <
+			0x164 (PIN_OUTPUT | MUX_MODE7)	/* ecap0_in_pwm0_out.gpio0_7 */
+		>;
+	};
 
 	lcd_pins_default: lcd_pins_default {
 		pinctrl-single,pins = <
@@ -294,9 +301,15 @@
 		>;
 	};
 
-	ecap2_pins: backlight_pins {
+	ecap2_pins_default: backlight_pins {
 		pinctrl-single,pins = <
 			0x19c 0x4	/* mcasp0_ahclkr.ecap2_in_pwm2_out MODE4 */
+		>;
+	};
+
+	ecap2_pins_sleep: ecap2_pins_sleep {
+		pinctrl-single,pins = <
+			0x19c (PIN_INPUT_PULLDOWN | MUX_MODE7)	/* mcasp0_ahclkr.ecap2_in_pwm2_out */
 		>;
 	};
 
@@ -380,9 +393,29 @@
 		>;
 	};
 
-	mmc1_pins: pinmux_mmc1_pins {
+	mmc1_pins_default: pinmux_mmc1_pins {
 		pinctrl-single,pins = <
-			0x160 (PIN_INPUT | MUX_MODE7) /* spi0_cs1.gpio0_6 */
+			0x0F0 (PIN_INPUT_PULLUP | MUX_MODE0)	/* mmc0_dat3.mmc0_dat3 */
+			0x0F4 (PIN_INPUT_PULLUP | MUX_MODE0)	/* mmc0_dat2.mmc0_dat2 */
+			0x0F8 (PIN_INPUT_PULLUP | MUX_MODE0)	/* mmc0_dat1.mmc0_dat1 */
+			0x0FC (PIN_INPUT_PULLUP | MUX_MODE0)	/* mmc0_dat0.mmc0_dat0 */
+			0x100 (PIN_INPUT_PULLUP | MUX_MODE0)	/* mmc0_clk.mmc0_clk */
+			0x104 (PIN_INPUT_PULLUP | MUX_MODE0)	/* mmc0_cmd.mmc0_cmd */
+			0x1A0 (PIN_INPUT_PULLUP | MUX_MODE7)	/* mcasp0_aclkr.gpio3_18 */
+			0x160 (PIN_INPUT | MUX_MODE7)		/* spi0_cs1.gpio0_6 */
+		>;
+	};
+
+	mmc1_pins_sleep: pinmux_mmc1_pins_sleep {
+		pinctrl-single,pins = <
+			0x0F0 (PIN_INPUT_PULLDOWN | MUX_MODE7)
+			0x0F4 (PIN_INPUT_PULLDOWN | MUX_MODE7)
+			0x0F8 (PIN_INPUT_PULLDOWN | MUX_MODE7)
+			0x0FC (PIN_INPUT_PULLDOWN | MUX_MODE7)
+			0x100 (PIN_INPUT_PULLDOWN | MUX_MODE7)
+			0x104 (PIN_INPUT_PULLDOWN | MUX_MODE7)
+			0x1A0 (PIN_INPUT_PULLDOWN | MUX_MODE7)
+			0x160 (PIN_INPUT_PULLDOWN | MUX_MODE7)
 		>;
 	};
 
@@ -507,9 +540,16 @@
 
 	ecap2: ecap@48304100 {
 		status = "okay";
-		pinctrl-names = "default";
-		pinctrl-0 = <&ecap2_pins>;
+		pinctrl-names = "default", "sleep";
+		pinctrl-0 = <&ecap2_pins_default>;
+		pinctrl-1 = <&ecap2_pins_sleep>;
 	};
+};
+
+&wkup_m3_ipc {
+	ti,needs-vtt-toggle;
+	ti,vtt-gpio-pin = <7>;
+	ti,scale-data-fw = "am335x-evm-scale-data.bin";
 };
 
 #include "tps65910.dtsi"
@@ -534,10 +574,10 @@
 		};
 
 		vdd1_reg: regulator@2 {
-			/* VDD_MPU voltage limits 0.95V - 1.26V with +/-4% tolerance */
+			/* VDD_MPU voltage limits 0.95V - 1.325V with +/-4% tolerance */
 			regulator-name = "vdd_mpu";
 			regulator-min-microvolt = <912500>;
-			regulator-max-microvolt = <1312500>;
+			regulator-max-microvolt = <1378000>;
 			regulator-boot-on;
 			regulator-always-on;
 		};
@@ -622,8 +662,9 @@
 	status = "okay";
 	vmmc-supply = <&vmmc_reg>;
 	bus-width = <4>;
-	pinctrl-names = "default";
-	pinctrl-0 = <&mmc1_pins>;
+	pinctrl-names = "default", "sleep";
+	pinctrl-0 = <&mmc1_pins_default>;
+	pinctrl-1 = <&mmc1_pins_sleep>;
 	cd-gpios = <&gpio0 6 GPIO_ACTIVE_HIGH>;
 };
 
@@ -645,8 +686,19 @@
 	ti,non-removable;
 	bus-width = <4>;
 	cap-power-off-card;
+	keep-power-in-suspend;
 	pinctrl-names = "default";
 	pinctrl-0 = <&mmc2_pins>;
+
+	#address-cells = <1>;
+	#size-cells = <0>;
+	wlcore: wlcore@2 {
+		compatible = "ti,wl1271";
+		reg = <2>;
+		interrupt-parent = <&gpio0>;
+		interrupts = <31 IRQ_TYPE_LEVEL_HIGH>; /* gpio 31 */
+		ref-clock-frequency = <38400000>;
+	};
 };
 
 &mcasp1 {
@@ -677,4 +729,8 @@
 
 &lcdc {
       status = "okay";
+};
+
+&sgx {
+	status = "okay";
 };

@@ -85,6 +85,7 @@
 #define DIV_PERIL4		0xc560
 #define DIV_PERIL5		0xc564
 #define E4X12_DIV_CAM1		0xc568
+#define E4X12_GATE_BUS_FSYS1	0xc744
 #define GATE_SCLK_CAM		0xc820
 #define GATE_IP_CAM		0xc920
 #define GATE_IP_TV		0xc924
@@ -1095,6 +1096,7 @@ static struct samsung_gate_clock exynos4x12_gate_clks[] __initdata = {
 		0),
 	GATE(CLK_PPMUIMAGE, "ppmuimage", "aclk200", E4X12_GATE_IP_IMAGE, 9, 0,
 		0),
+	GATE(CLK_TSADC, "tsadc", "aclk133", E4X12_GATE_BUS_FSYS1, 16, 0, 0),
 	GATE(CLK_MIPI_HSI, "mipi_hsi", "aclk133", GATE_IP_FSYS, 10, 0, 0),
 	GATE(CLK_CHIPID, "chipid", "aclk100", E4X12_GATE_IP_PERIR, 0, 0, 0),
 	GATE(CLK_SYSREG, "sysreg", "aclk100", E4X12_GATE_IP_PERIR, 1,
@@ -1354,7 +1356,7 @@ static struct samsung_pll_clock exynos4x12_plls[nr_plls] __initdata = {
 			VPLL_LOCK, VPLL_CON0, NULL),
 };
 
-static void __init exynos4_core_down_clock(enum exynos4_soc soc)
+static void __init exynos4x12_core_down_clock(void)
 {
 	unsigned int tmp;
 
@@ -1373,11 +1375,9 @@ static void __init exynos4_core_down_clock(enum exynos4_soc soc)
 	__raw_writel(tmp, reg_base + PWR_CTRL1);
 
 	/*
-	 * Disable the clock up feature on Exynos4x12, in case it was
-	 * enabled by bootloader.
+	 * Disable the clock up feature in case it was enabled by bootloader.
 	 */
-	if (exynos4_soc == EXYNOS4X12)
-		__raw_writel(0x0, reg_base + E4X12_PWR_CTRL2);
+	__raw_writel(0x0, reg_base + E4X12_PWR_CTRL2);
 }
 
 /* register exynos4 clocks */
@@ -1474,7 +1474,8 @@ static void __init exynos4_clk_init(struct device_node *np,
 	samsung_clk_register_alias(ctx, exynos4_aliases,
 			ARRAY_SIZE(exynos4_aliases));
 
-	exynos4_core_down_clock(soc);
+	if (soc == EXYNOS4X12)
+		exynos4x12_core_down_clock();
 	exynos4_clk_sleep_init();
 
 	samsung_clk_of_add_provider(np, ctx);

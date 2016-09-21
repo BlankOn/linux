@@ -693,7 +693,7 @@ static void __put_nommu_region(struct vm_region *region)
 		up_write(&nommu_region_sem);
 
 		if (region->vm_file)
-			fput(region->vm_file);
+			vmr_fput(region);
 
 		/* IO memory and memory shared directly out of the pagecache
 		 * from ramfs/tmpfs mustn't be released here */
@@ -858,7 +858,7 @@ static void delete_vma(struct mm_struct *mm, struct vm_area_struct *vma)
 	if (vma->vm_ops && vma->vm_ops->close)
 		vma->vm_ops->close(vma);
 	if (vma->vm_file)
-		fput(vma->vm_file);
+		vma_fput(vma);
 	put_nommu_region(vma->vm_region);
 	kmem_cache_free(vm_area_cachep, vma);
 }
@@ -1016,7 +1016,7 @@ static int validate_mmap_request(struct file *file,
 		 * device */
 		if (!file->f_op->get_unmapped_area)
 			capabilities &= ~NOMMU_MAP_DIRECT;
-		if (!file->f_op->read)
+		if (!(file->f_mode & FMODE_CAN_READ))
 			capabilities &= ~NOMMU_MAP_COPY;
 
 		/* The file shall have been opened with read permission. */
@@ -1240,7 +1240,7 @@ static int do_mmap_private(struct vm_area_struct *vma,
 
 		old_fs = get_fs();
 		set_fs(KERNEL_DS);
-		ret = vma->vm_file->f_op->read(vma->vm_file, base, len, &fpos);
+		ret = __vfs_read(vma->vm_file, base, len, &fpos);
 		set_fs(old_fs);
 
 		if (ret < 0)
@@ -1398,7 +1398,7 @@ unsigned long do_mmap_pgoff(struct file *file,
 					goto error_just_free;
 				}
 			}
-			fput(region->vm_file);
+			vmr_fput(region);
 			kmem_cache_free(vm_region_jar, region);
 			region = pregion;
 			result = start;
@@ -1474,10 +1474,10 @@ error_just_free:
 	up_write(&nommu_region_sem);
 error:
 	if (region->vm_file)
-		fput(region->vm_file);
+		vmr_fput(region);
 	kmem_cache_free(vm_region_jar, region);
 	if (vma->vm_file)
-		fput(vma->vm_file);
+		vma_fput(vma);
 	kmem_cache_free(vm_area_cachep, vma);
 	kleave(" = %d", ret);
 	return ret;

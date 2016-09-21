@@ -423,6 +423,7 @@ int vp_set_vq_affinity(struct virtqueue *vq, int cpu)
 		if (cpu == -1)
 			irq_set_affinity_hint(irq, NULL);
 		else {
+			cpumask_clear(mask);
 			cpumask_set_cpu(cpu, mask);
 			irq_set_affinity_hint(irq, mask);
 		}
@@ -553,6 +554,7 @@ err_enable_device:
 static void virtio_pci_remove(struct pci_dev *pci_dev)
 {
 	struct virtio_pci_device *vp_dev = pci_get_drvdata(pci_dev);
+	struct device *dev = get_device(&vp_dev->vdev.dev);
 
 	unregister_virtio_device(&vp_dev->vdev);
 
@@ -563,6 +565,7 @@ static void virtio_pci_remove(struct pci_dev *pci_dev)
 
 	pci_release_regions(pci_dev);
 	pci_disable_device(pci_dev);
+	put_device(dev);
 }
 
 static struct pci_driver virtio_pci_driver = {

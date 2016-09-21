@@ -20,7 +20,7 @@
 
 #include <video/omapdss.h>
 
-#include "dss.h"
+#include "dss-common.h"
 
 struct device_node *
 omapdss_of_get_next_port(const struct device_node *parent,
@@ -60,6 +60,7 @@ omapdss_of_get_next_port(const struct device_node *parent,
 			}
 			prev = port;
 		} while (of_node_cmp(port->name, "port") != 0);
+		of_node_put(ports);
 	}
 
 	return port;
@@ -94,7 +95,7 @@ struct device_node *dss_of_port_get_parent_device(struct device_node *port)
 	if (!port)
 		return NULL;
 
-	np = of_get_next_parent(port);
+	np = of_get_parent(port);
 
 	for (i = 0; i < 2 && np; ++i) {
 		struct property *prop;
@@ -109,6 +110,7 @@ struct device_node *dss_of_port_get_parent_device(struct device_node *port)
 
 	return NULL;
 }
+EXPORT_SYMBOL_GPL(dss_of_port_get_parent_device);
 
 u32 dss_of_port_get_port_number(struct device_node *port)
 {
@@ -121,6 +123,7 @@ u32 dss_of_port_get_port_number(struct device_node *port)
 
 	return reg;
 }
+EXPORT_SYMBOL_GPL(dss_of_port_get_port_number);
 
 static struct device_node *omapdss_of_get_remote_port(const struct device_node *node)
 {
@@ -179,3 +182,64 @@ omapdss_of_find_source_for_first_ep(struct device_node *node)
 	return src ? src : ERR_PTR(-EPROBE_DEFER);
 }
 EXPORT_SYMBOL_GPL(omapdss_of_find_source_for_first_ep);
+
+static struct device_node *omapdss_of_get_port_by_index(struct device_node *parent,
+	int index)
+{
+	struct device_node *port;
+
+	for (port = omapdss_of_get_next_port(parent, NULL);
+	     port != NULL;
+	     port = omapdss_of_get_next_port(parent, port)) {
+		u32 reg;
+		int r;
+
+		r = of_property_read_u32(port, "reg", &reg);
+		if (r)
+			reg = 0;
+
+		if (reg == index)
+			return port;
+	}
+
+	return NULL;
+}
+
+static struct device_node *omapdss_of_get_endpoint_by_index(struct device_node *port,
+	int index)
+{
+	struct device_node *ep;
+
+	for (ep = omapdss_of_get_next_endpoint(port, NULL);
+	     ep != NULL;
+	     ep = omapdss_of_get_next_endpoint(port, ep)) {
+		u32 reg;
+		int r;
+
+		r = of_property_read_u32(ep, "reg", &reg);
+		if (r)
+			reg = 0;
+
+		if (reg == index)
+			return ep;
+	}
+
+	return NULL;
+}
+
+struct device_node *omapdss_of_get_endpoint(struct device_node *parent,
+	int port_index, int ep_index)
+{
+	struct device_node *port, *ep;
+
+	port = omapdss_of_get_port_by_index(parent, port_index);
+	if (port == NULL)
+		return NULL;
+
+	ep = omapdss_of_get_endpoint_by_index(port, ep_index);
+
+	of_node_put(port);
+
+	return ep;
+}
+EXPORT_SYMBOL_GPL(omapdss_of_get_endpoint);

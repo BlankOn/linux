@@ -20,6 +20,7 @@
 #include <linux/slab.h>
 #include <linux/spinlock.h>
 #include <linux/timer.h>
+#include <linux/of.h>
 #include "leds.h"
 
 static struct class *leds_class;
@@ -187,6 +188,7 @@ void led_classdev_resume(struct led_classdev *led_cdev)
 }
 EXPORT_SYMBOL_GPL(led_classdev_resume);
 
+#ifdef CONFIG_PM_SLEEP
 static int led_suspend(struct device *dev)
 {
 	struct led_classdev *led_cdev = dev_get_drvdata(dev);
@@ -206,11 +208,111 @@ static int led_resume(struct device *dev)
 
 	return 0;
 }
+#endif
 
-static const struct dev_pm_ops leds_class_dev_pm_ops = {
-	.suspend        = led_suspend,
-	.resume         = led_resume,
-};
+static SIMPLE_DEV_PM_OPS(leds_class_dev_pm_ops, led_suspend, led_resume);
+
+/* find OF node for the given led_cdev */
+static struct device_node *find_led_of_node(struct led_classdev *led_cdev)
+{
+	struct device *led_dev = led_cdev->dev;
+	struct device_node *child;
+
+	for_each_child_of_node(led_dev->parent->of_node, child) {
+		if (of_property_match_string(child, "label", led_cdev->name) == 0)
+			return child;
+	}
+
+	return NULL;
+}
+
+static int led_match_led_node(struct device *led_dev, const void *data)
+{
+	struct led_classdev *led_cdev = dev_get_drvdata(led_dev);
+	const struct device_node *target_node = data;
+	struct device_node *led_node;
+
+	led_node = find_led_of_node(led_cdev);
+	if (!led_node)
+		return 0;
+
+	of_node_put(led_node);
+
+	return led_node == target_node ? 1 : 0;
+}
+
+/**
+ * of_led_get() - request a LED device via the LED framework
+ * @np: device node to get the LED device from
+ *
+ * Returns the LED device parsed from the phandle specified in the "leds"
+ * property of a device tree node or a negative error-code on failure.
+ */
+struct led_classdev *of_led_get(struct device_node *np)
+{
+	struct device *led_dev;
+	struct led_classdev *led_cdev;
+	struct device_node *led_node;
+
+	led_node = of_parse_phandle(np, "leds", 0);
+	if (!led_node)
+		return ERR_PTR(-ENODEV);
+
+	led_dev = class_find_device(leds_class, NULL, led_node,
+		led_match_led_node);
+	if (!led_dev) {
+		of_node_put(led_node);
+		return ERR_PTR(-EPROBE_DEFER);
+	}
+
+	of_node_put(led_node);
+
+	led_cdev = dev_get_drvdata(led_dev);
+
+	if (!try_module_get(led_cdev->dev->parent->driver->owner))
+		return ERR_PTR(-ENODEV);
+
+	return led_cdev;
+}
+EXPORT_SYMBOL_GPL(of_led_get);
+
+/**
+ * led_put() - release a LED device
+ * @led_cdev: LED device
+ */
+void led_put(struct led_classdev *led_cdev)
+{
+	module_put(led_cdev->dev->parent->driver->owner);
+}
+EXPORT_SYMBOL_GPL(led_put);
+
+static int match_name(struct device *dev, const void *data)
+{
+	if (!dev_name(dev))
+		return 0;
+	return !strcmp(dev_name(dev), (char *)data);
+}
+
+static int led_classdev_next_name(const char *init_name, char *name,
+				  size_t len)
+{
+	unsigned int i = 0;
+	int ret = 0;
+	struct device *dev;
+
+	strlcpy(name, init_name, len);
+
+	while ((ret < len) &&
+	       (dev = class_find_device(leds_class, NULL, name, match_name))) {
+		put_device(dev);
+		ret = snprintf(name, len, "%s_%u", init_name, ++i);
+	}
+
+	if (ret >= len)
+		return -ENOMEM;
+
+	return i;
+}
 
 /**
  * led_classdev_register - register a new object of led_classdev class.
@@ -219,11 +321,21 @@ static const struct dev_pm_ops leds_class_dev_pm_ops = {
  */
 int led_classdev_register(struct device *parent, struct led_classdev *led_cdev)
 {
+	char name[64];
+	int ret;
+
+	ret = led_classdev_next_name(led_cdev->name, name, sizeof(name));
+	if (ret < 0)
+		return ret;
+
 	led_cdev->dev = device_create_with_groups(leds_class, parent, 0,
-					led_cdev, led_cdev->groups,
-					"%s", led_cdev->name);
+				led_cdev, led_cdev->groups, "%s", name);
 	if (IS_ERR(led_cdev->dev))
 		return PTR_ERR(led_cdev->dev);
+
+	if (ret)
+		dev_warn(parent, "Led %s renamed to %s due to name collision",
+				led_cdev->name, dev_name(led_cdev->dev));
 
 #ifdef CONFIG_LEDS_TRIGGERS
 	init_rwsem(&led_cdev->trigger_lock);
@@ -287,6 +399,63 @@ void led_classdev_unregister(struct led_classdev *led_cdev)
 	mutex_destroy(&led_cdev->led_access);
 }
 EXPORT_SYMBOL_GPL(led_classdev_unregister);
+
+static void devm_led_classdev_release(struct device *dev, void *res)
+{
+	led_classdev_unregister(*(struct led_classdev **)res);
+}
+
+/**
+ * devm_led_classdev_register - resource managed led_classdev_register()
+ * @parent: The device to register.
+ * @led_cdev: the led_classdev structure for this device.
+ */
+int devm_led_classdev_register(struct device *parent,
+			       struct led_classdev *led_cdev)
+{
+	struct led_classdev **dr;
+	int rc;
+
+	dr = devres_alloc(devm_led_classdev_release, sizeof(*dr), GFP_KERNEL);
+	if (!dr)
+		return -ENOMEM;
+
+	rc = led_classdev_register(parent, led_cdev);
+	if (rc) {
+		devres_free(dr);
+		return rc;
+	}
+
+	*dr = led_cdev;
+	devres_add(parent, dr);
+
+	return 0;
+}
+EXPORT_SYMBOL_GPL(devm_led_classdev_register);
+
+static int devm_led_classdev_match(struct device *dev, void *res, void *data)
+{
+	struct led_cdev **p = res;
+
+	if (WARN_ON(!p || !*p))
+		return 0;
+
+	return *p == data;
+}
+
+/**
+ * devm_led_classdev_unregister() - resource managed led_classdev_unregister()
+ * @parent: The device to unregister.
+ * @led_cdev: the led_classdev structure for this device.
+ */
+void devm_led_classdev_unregister(struct device *dev,
+				  struct led_classdev *led_cdev)
+{
+	WARN_ON(devres_release(dev,
+			       devm_led_classdev_release,
+			       devm_led_classdev_match, led_cdev));
+}
+EXPORT_SYMBOL_GPL(devm_led_classdev_unregister);
 
 static int __init leds_init(void)
 {

@@ -178,12 +178,13 @@ ftrace_print_hex_seq(struct trace_seq *p, const unsigned char *buf, int buf_len)
 EXPORT_SYMBOL(ftrace_print_hex_seq);
 
 const char *
-ftrace_print_array_seq(struct trace_seq *p, const void *buf, int buf_len,
+ftrace_print_array_seq(struct trace_seq *p, const void *buf, int count,
 		       size_t el_size)
 {
 	const char *ret = trace_seq_buffer_ptr(p);
 	const char *prefix = "";
 	void *ptr = (void *)buf;
+	size_t buf_len = count * el_size;
 
 	trace_seq_putc(p, '{');
 
@@ -429,6 +430,7 @@ int trace_print_lat_fmt(struct trace_seq *s, struct trace_entry *entry)
 {
 	char hardsoft_irq;
 	char need_resched;
+	char need_resched_lazy;
 	char irqs_off;
 	int hardirq;
 	int softirq;
@@ -456,6 +458,8 @@ int trace_print_lat_fmt(struct trace_seq *s, struct trace_entry *entry)
 		need_resched = '.';
 		break;
 	}
+	need_resched_lazy =
+		(entry->flags & TRACE_FLAG_NEED_RESCHED_LAZY) ? 'L' : '.';
 
 	hardsoft_irq =
 		(hardirq && softirq) ? 'H' :
@@ -463,11 +467,22 @@ int trace_print_lat_fmt(struct trace_seq *s, struct trace_entry *entry)
 		softirq ? 's' :
 		'.';
 
-	trace_seq_printf(s, "%c%c%c",
-			 irqs_off, need_resched, hardsoft_irq);
+	trace_seq_printf(s, "%c%c%c%c",
+			 irqs_off, need_resched, need_resched_lazy,
+			 hardsoft_irq);
 
 	if (entry->preempt_count)
 		trace_seq_printf(s, "%x", entry->preempt_count);
+	else
+		trace_seq_putc(s, '.');
+
+	if (entry->preempt_lazy_count)
+		trace_seq_printf(s, "%x", entry->preempt_lazy_count);
+	else
+		trace_seq_putc(s, '.');
+
+	if (entry->migrate_disable)
+		trace_seq_printf(s, "%x", entry->migrate_disable);
 	else
 		trace_seq_putc(s, '.');
 

@@ -21,7 +21,6 @@
 #include <linux/fs.h>
 #include <linux/time.h>
 #include <linux/vmalloc.h>
-#include <linux/jbd2.h>
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <linux/blkdev.h>
@@ -295,6 +294,8 @@ static void __save_error_info(struct super_block *sb, const char *func,
 	struct ext4_super_block *es = EXT4_SB(sb)->s_es;
 
 	EXT4_SB(sb)->s_mount_state |= EXT4_ERROR_FS;
+	if (bdev_read_only(sb->s_bdev))
+		return;
 	es->s_state |= cpu_to_le16(EXT4_ERROR_FS);
 	es->s_last_error_time = cpu_to_le32(get_seconds());
 	strncpy(es->s_last_error_func, func, sizeof(es->s_last_error_func));
@@ -395,9 +396,13 @@ static void ext4_handle_error(struct super_block *sb)
 		smp_wmb();
 		sb->s_flags |= MS_RDONLY;
 	}
-	if (test_opt(sb, ERRORS_PANIC))
+	if (test_opt(sb, ERRORS_PANIC)) {
+		if (EXT4_SB(sb)->s_journal &&
+		  !(EXT4_SB(sb)->s_journal->j_flags & JBD2_REC_ERR))
+			return;
 		panic("EXT4-fs (device %s): panic forced after error\n",
 			sb->s_id);
+	}
 }
 
 #define ext4_error_ratelimit(sb)					\
@@ -586,8 +591,12 @@ void __ext4_abort(struct super_block *sb, const char *function,
 			jbd2_journal_abort(EXT4_SB(sb)->s_journal, -EIO);
 		save_error_info(sb, function, line);
 	}
-	if (test_opt(sb, ERRORS_PANIC))
+	if (test_opt(sb, ERRORS_PANIC)) {
+		if (EXT4_SB(sb)->s_journal &&
+		  !(EXT4_SB(sb)->s_journal->j_flags & JBD2_REC_ERR))
+			return;
 		panic("EXT4-fs panic from previous error\n");
+	}
 }
 
 void __ext4_msg(struct super_block *sb,
@@ -822,6 +831,7 @@ static void ext4_put_super(struct super_block *sb)
 		dump_orphan_list(sb, sbi);
 	J_ASSERT(list_empty(&sbi->s_orphan));
 
+	sync_blockdev(sb->s_bdev);
 	invalidate_bdev(sb->s_bdev);
 	if (sbi->journal_bdev && sbi->journal_bdev != sb->s_bdev) {
 		/*
@@ -893,6 +903,9 @@ static struct inode *ext4_alloc_inode(struct super_block *sb)
 	atomic_set(&ei->i_ioend_count, 0);
 	atomic_set(&ei->i_unwritten, 0);
 	INIT_WORK(&ei->i_rsv_conversion_work, ext4_end_io_rsv_work);
+#ifdef CONFIG_EXT4_FS_ENCRYPTION
+	ei->i_encryption_key.mode = EXT4_ENCRYPTION_MODE_INVALID;
+#endif
 
 	return &ei->vfs_inode;
 }
@@ -932,6 +945,7 @@ static void init_once(void *foo)
 	INIT_LIST_HEAD(&ei->i_orphan);
 	init_rwsem(&ei->xattr_sem);
 	init_rwsem(&ei->i_data_sem);
+	init_rwsem(&ei->i_mmap_sem);
 	inode_init_once(&ei->vfs_inode);
 }
 
@@ -1076,7 +1090,7 @@ static const struct quotactl_ops ext4_qctl_operations = {
 	.quota_on	= ext4_quota_on,
 	.quota_off	= ext4_quota_off,
 	.quota_sync	= dquot_quota_sync,
-	.get_info	= dquot_get_dqinfo,
+	.get_state	= dquot_get_state,
 	.set_info	= dquot_set_dqinfo,
 	.get_dqblk	= dquot_get_dqblk,
 	.set_dqblk	= dquot_set_dqblk
@@ -1120,7 +1134,7 @@ enum {
 	Opt_commit, Opt_min_batch_time, Opt_max_batch_time, Opt_journal_dev,
 	Opt_journal_path, Opt_journal_checksum, Opt_journal_async_commit,
 	Opt_abort, Opt_data_journal, Opt_data_ordered, Opt_data_writeback,
-	Opt_data_err_abort, Opt_data_err_ignore,
+	Opt_data_err_abort, Opt_data_err_ignore, Opt_test_dummy_encryption,
 	Opt_usrjquota, Opt_grpjquota, Opt_offusrjquota, Opt_offgrpjquota,
 	Opt_jqfmt_vfsold, Opt_jqfmt_vfsv0, Opt_jqfmt_vfsv1, Opt_quota,
 	Opt_noquota, Opt_barrier, Opt_nobarrier, Opt_err,
@@ -1211,6 +1225,7 @@ static const match_table_t tokens = {
 	{Opt_init_itable, "init_itable"},
 	{Opt_noinit_itable, "noinit_itable"},
 	{Opt_max_dir_size_kb, "max_dir_size_kb=%u"},
+	{Opt_test_dummy_encryption, "test_dummy_encryption"},
 	{Opt_removed, "check=none"},	/* mount option from ext2/3 */
 	{Opt_removed, "nocheck"},	/* mount option from ext2/3 */
 	{Opt_removed, "reservation"},	/* mount option from ext2/3 */
@@ -1261,9 +1276,9 @@ static int set_qf_name(struct super_block *sb, int qtype, substring_t *args)
 		return -1;
 	}
 	if (EXT4_HAS_RO_COMPAT_FEATURE(sb, EXT4_FEATURE_RO_COMPAT_QUOTA)) {
-		ext4_msg(sb, KERN_ERR, "Cannot set journaled quota options "
-			 "when QUOTA feature is enabled");
-		return -1;
+		ext4_msg(sb, KERN_INFO, "Journaled quota options "
+			 "ignored when QUOTA feature is enabled");
+		return 1;
 	}
 	qname = match_strdup(args);
 	if (!qname) {
@@ -1412,6 +1427,7 @@ static const struct mount_opts {
 	{Opt_jqfmt_vfsv0, QFMT_VFS_V0, MOPT_QFMT},
 	{Opt_jqfmt_vfsv1, QFMT_VFS_V1, MOPT_QFMT},
 	{Opt_max_dir_size_kb, 0, MOPT_GTE0},
+	{Opt_test_dummy_encryption, 0, MOPT_GTE0},
 	{Opt_err, 0, 0}
 };
 
@@ -1568,7 +1584,7 @@ static int handle_mount_opt(struct super_block *sb, char *opt, int token,
 			return -1;
 		}
 
-		journal_inode = path.dentry->d_inode;
+		journal_inode = d_inode(path.dentry);
 		if (!S_ISBLK(journal_inode->i_mode)) {
 			ext4_msg(sb, KERN_ERR, "error: journal path %s "
 				"is not a block device", journal_path);
@@ -1588,6 +1604,15 @@ static int handle_mount_opt(struct super_block *sb, char *opt, int token,
 		}
 		*journal_ioprio =
 			IOPRIO_PRIO_VALUE(IOPRIO_CLASS_BE, arg);
+	} else if (token == Opt_test_dummy_encryption) {
+#ifdef CONFIG_EXT4_FS_ENCRYPTION
+		sbi->s_mount_flags |= EXT4_MF_TEST_DUMMY_ENCRYPTION;
+		ext4_msg(sb, KERN_WARNING,
+			 "Test dummy encryption mode enabled");
+#else
+		ext4_msg(sb, KERN_WARNING,
+			 "Test dummy encryption mount option ignored");
+#endif
 	} else if (m->flags & MOPT_DATAJ) {
 		if (is_remount) {
 			if (!sbi->s_journal)
@@ -1611,10 +1636,10 @@ static int handle_mount_opt(struct super_block *sb, char *opt, int token,
 		}
 		if (EXT4_HAS_RO_COMPAT_FEATURE(sb,
 					       EXT4_FEATURE_RO_COMPAT_QUOTA)) {
-			ext4_msg(sb, KERN_ERR,
-				 "Cannot set journaled quota options "
+			ext4_msg(sb, KERN_INFO,
+				 "Quota format mount options ignored "
 				 "when QUOTA feature is enabled");
-			return -1;
+			return 1;
 		}
 		sbi->s_jquota_fmt = m->mount_opt;
 #endif
@@ -1671,11 +1696,11 @@ static int parse_options(char *options, struct super_block *sb,
 #ifdef CONFIG_QUOTA
 	if (EXT4_HAS_RO_COMPAT_FEATURE(sb, EXT4_FEATURE_RO_COMPAT_QUOTA) &&
 	    (test_opt(sb, USRQUOTA) || test_opt(sb, GRPQUOTA))) {
-		ext4_msg(sb, KERN_ERR, "Cannot set quota options when QUOTA "
-			 "feature is enabled");
-		return 0;
-	}
-	if (sbi->s_qf_names[USRQUOTA] || sbi->s_qf_names[GRPQUOTA]) {
+		ext4_msg(sb, KERN_INFO, "Quota feature enabled, usrquota and grpquota "
+			 "mount options ignored.");
+		clear_opt(sb, USRQUOTA);
+		clear_opt(sb, GRPQUOTA);
+	} else if (sbi->s_qf_names[USRQUOTA] || sbi->s_qf_names[GRPQUOTA]) {
 		if (test_opt(sb, USRQUOTA) && sbi->s_qf_names[USRQUOTA])
 			clear_opt(sb, USRQUOTA);
 
@@ -1738,10 +1763,10 @@ static inline void ext4_show_quota_options(struct seq_file *seq,
 	}
 
 	if (sbi->s_qf_names[USRQUOTA])
-		seq_printf(seq, ",usrjquota=%s", sbi->s_qf_names[USRQUOTA]);
+		seq_show_option(seq, "usrjquota", sbi->s_qf_names[USRQUOTA]);
 
 	if (sbi->s_qf_names[GRPQUOTA])
-		seq_printf(seq, ",grpjquota=%s", sbi->s_qf_names[GRPQUOTA]);
+		seq_show_option(seq, "grpjquota", sbi->s_qf_names[GRPQUOTA]);
 #endif
 }
 
@@ -2685,11 +2710,13 @@ static struct attribute *ext4_attrs[] = {
 EXT4_INFO_ATTR(lazy_itable_init);
 EXT4_INFO_ATTR(batched_discard);
 EXT4_INFO_ATTR(meta_bg_resize);
+EXT4_INFO_ATTR(encryption);
 
 static struct attribute *ext4_feat_attrs[] = {
 	ATTR_LIST(lazy_itable_init),
 	ATTR_LIST(batched_discard),
 	ATTR_LIST(meta_bg_resize),
+	ATTR_LIST(encryption),
 	NULL,
 };
 
@@ -3448,6 +3475,11 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 	if (sb->s_bdev->bd_part)
 		sbi->s_sectors_written_start =
 			part_stat_read(sb->s_bdev->bd_part, sectors[1]);
+#ifdef CONFIG_EXT4_FS_ENCRYPTION
+	/* Modes of operations for file and directory encryption. */
+	sbi->s_file_encryption_mode = EXT4_ENCRYPTION_MODE_AES_256_XTS;
+	sbi->s_dir_encryption_mode = EXT4_ENCRYPTION_MODE_INVALID;
+#endif
 
 	/* Cleanup superblock name */
 	for (cp = sb->s_id; (cp = strchr(cp, '/'));)
@@ -3690,6 +3722,13 @@ static int ext4_fill_super(struct super_block *sb, void *data, int silent)
 					"error: device does not support dax");
 			goto failed_mount;
 		}
+	}
+
+	if (EXT4_HAS_INCOMPAT_FEATURE(sb, EXT4_FEATURE_INCOMPAT_ENCRYPT) &&
+	    es->s_encryption_level) {
+		ext4_msg(sb, KERN_ERR, "Unsupported encryption level %d",
+			 es->s_encryption_level);
+		goto failed_mount;
 	}
 
 	if (sb->s_blocksize != blocksize) {
@@ -4052,6 +4091,13 @@ no_journal:
 			ext4_msg(sb, KERN_ERR, "Failed to create an mb_cache");
 			goto failed_mount_wq;
 		}
+	}
+
+	if (unlikely(sbi->s_mount_flags & EXT4_MF_TEST_DUMMY_ENCRYPTION) &&
+	    !(sb->s_flags & MS_RDONLY) &&
+	    !EXT4_HAS_INCOMPAT_FEATURE(sb, EXT4_FEATURE_INCOMPAT_ENCRYPT)) {
+		EXT4_SET_INCOMPAT_FEATURE(sb, EXT4_FEATURE_INCOMPAT_ENCRYPT);
+		ext4_commit_super(sb, 1);
 	}
 
 	/*
@@ -4786,10 +4832,11 @@ static int ext4_freeze(struct super_block *sb)
 		error = jbd2_journal_flush(journal);
 		if (error < 0)
 			goto out;
+
+		/* Journal blocked and flushed, clear needs_recovery flag. */
+		EXT4_CLEAR_INCOMPAT_FEATURE(sb, EXT4_FEATURE_INCOMPAT_RECOVER);
 	}
 
-	/* Journal blocked and flushed, clear needs_recovery flag. */
-	EXT4_CLEAR_INCOMPAT_FEATURE(sb, EXT4_FEATURE_INCOMPAT_RECOVER);
 	error = ext4_commit_super(sb, 1);
 out:
 	if (journal)
@@ -4807,8 +4854,11 @@ static int ext4_unfreeze(struct super_block *sb)
 	if (sb->s_flags & MS_RDONLY)
 		return 0;
 
-	/* Reset the needs_recovery flag before the fs is unlocked. */
-	EXT4_SET_INCOMPAT_FEATURE(sb, EXT4_FEATURE_INCOMPAT_RECOVER);
+	if (EXT4_SB(sb)->s_journal) {
+		/* Reset the needs_recovery flag before the fs is unlocked. */
+		EXT4_SET_INCOMPAT_FEATURE(sb, EXT4_FEATURE_INCOMPAT_RECOVER);
+	}
+
 	ext4_commit_super(sb, 1);
 	return 0;
 }
@@ -4922,6 +4972,9 @@ static int ext4_remount(struct super_block *sb, int *flags, char *data)
 		ext4_init_journal_params(sb, sbi->s_journal);
 		set_task_ioprio(sbi->s_journal->j_task, journal_ioprio);
 	}
+
+	if (*flags & MS_LAZYTIME)
+		sb->s_flags |= MS_LAZYTIME;
 
 	if ((*flags & MS_RDONLY) != (sb->s_flags & MS_RDONLY)) {
 		if (sbi->s_mount_flags & EXT4_MF_FS_ABORTED) {
@@ -5199,7 +5252,7 @@ static int ext4_write_info(struct super_block *sb, int type)
 	handle_t *handle;
 
 	/* Data block + inode block */
-	handle = ext4_journal_start(sb->s_root->d_inode, EXT4_HT_QUOTA, 2);
+	handle = ext4_journal_start(d_inode(sb->s_root), EXT4_HT_QUOTA, 2);
 	if (IS_ERR(handle))
 		return PTR_ERR(handle);
 	ret = dquot_commit_info(sb, type);
@@ -5217,6 +5270,20 @@ static int ext4_quota_on_mount(struct super_block *sb, int type)
 {
 	return dquot_quota_on_mount(sb, EXT4_SB(sb)->s_qf_names[type],
 					EXT4_SB(sb)->s_jquota_fmt, type);
+}
+
+static void lockdep_set_quota_inode(struct inode *inode, int subclass)
+{
+	struct ext4_inode_info *ei = EXT4_I(inode);
+
+	/* The first argument of lockdep_set_subclass has to be
+	 * *exactly* the same as the argument to init_rwsem() --- in
+	 * this case, in init_once() --- or lockdep gets unhappy
+	 * because the name of the lock is set using the
+	 * stringification of the argument to init_rwsem().
+	 */
+	(void) ei;	/* shut up clang warning if !CONFIG_LOCKDEP */
+	lockdep_set_subclass(&ei->i_data_sem, subclass);
 }
 
 /*
@@ -5247,7 +5314,7 @@ static int ext4_quota_on(struct super_block *sb, int type, int format_id,
 	 * all updates to the file when we bypass pagecache...
 	 */
 	if (EXT4_SB(sb)->s_journal &&
-	    ext4_should_journal_data(path->dentry->d_inode)) {
+	    ext4_should_journal_data(d_inode(path->dentry))) {
 		/*
 		 * We don't need to lock updates but journal_flush() could
 		 * otherwise be livelocked...
@@ -5258,8 +5325,12 @@ static int ext4_quota_on(struct super_block *sb, int type, int format_id,
 		if (err)
 			return err;
 	}
-
-	return dquot_quota_on(sb, type, format_id, path);
+	lockdep_set_quota_inode(path->dentry->d_inode, I_DATA_SEM_QUOTA);
+	err = dquot_quota_on(sb, type, format_id, path);
+	if (err)
+		lockdep_set_quota_inode(path->dentry->d_inode,
+					     I_DATA_SEM_NORMAL);
+	return err;
 }
 
 static int ext4_quota_enable(struct super_block *sb, int type, int format_id,
@@ -5285,8 +5356,11 @@ static int ext4_quota_enable(struct super_block *sb, int type, int format_id,
 
 	/* Don't account quota for quota files to avoid recursion */
 	qf_inode->i_flags |= S_NOQUOTA;
+	lockdep_set_quota_inode(qf_inode, I_DATA_SEM_QUOTA);
 	err = dquot_enable(qf_inode, type, format_id, flags);
 	iput(qf_inode);
+	if (err)
+		lockdep_set_quota_inode(qf_inode, I_DATA_SEM_NORMAL);
 
 	return err;
 }

@@ -6,6 +6,7 @@ config OPROFILE
 	tristate "OProfile system profiling"
 	depends on PROFILING
 	depends on HAVE_OPROFILE
+	depends on !PREEMPT_RT_FULL
 	select RING_BUFFER
 	select RING_BUFFER_ALLOW_SWAP
 	help
@@ -32,7 +33,7 @@ config HAVE_OPROFILE
 
 config OPROFILE_NMI_TIMER
 	def_bool y
-	depends on PERF_EVENTS && HAVE_PERF_EVENTS_NMI
+	depends on PERF_EVENTS && HAVE_PERF_EVENTS_NMI && !PPC64
 
 config KPROBES
 	bool "Kprobes"
@@ -49,6 +50,7 @@ config KPROBES
 config JUMP_LABEL
        bool "Optimize very unlikely/likely branches"
        depends on HAVE_ARCH_JUMP_LABEL
+       depends on (!INTERRUPT_OFF_HIST && !PREEMPT_OFF_HIST && !WAKEUP_LATENCY_HIST && !MISSED_TIMER_OFFSETS_HIST)
        help
          This option enables a transparent branch optimization that
 	 makes certain almost-always-true or almost-always-false branch
@@ -446,6 +448,9 @@ config HAVE_IRQ_TIME_ACCOUNTING
 config HAVE_ARCH_TRANSPARENT_HUGEPAGE
 	bool
 
+config HAVE_ARCH_HUGE_VMAP
+	bool
+
 config HAVE_ARCH_SOFT_DIRTY
 	bool
 
@@ -483,6 +488,18 @@ config HAVE_IRQ_EXIT_ON_IRQ_STACK
 	  in the end of an hardirq.
 	  This spares a stack switch and improves cache usage on softirq
 	  processing.
+
+config PGTABLE_LEVELS
+	int
+	default 2
+
+config ARCH_HAS_ELF_RANDOMIZE
+	bool
+	help
+	  An architecture supports choosing randomized locations for
+	  stack, mmap, brk, and ET_DYN. Defined functions:
+	  - arch_mmap_rnd()
+	  - arch_randomize_brk()
 
 #
 # ABI hall of shame

@@ -1,5 +1,5 @@
 /*
- * Linux network driver for Brocade Converged Network Adapter.
+ * Linux network driver for QLogic BR-series Converged Network Adapter.
  *
  * This program is free software; you can redistribute it and/or modify it
  * under the terms of the GNU General Public License (GPL) Version 2 as
@@ -11,9 +11,10 @@
  * General Public License for more details.
  */
 /*
- * Copyright (c) 2005-2010 Brocade Communications Systems, Inc.
+ * Copyright (c) 2005-2014 Brocade Communications Systems, Inc.
+ * Copyright (c) 2014-2015 QLogic Corporation
  * All rights reserved
- * www.brocade.com
+ * www.qlogic.com
  */
 #include <linux/bitops.h>
 #include <linux/netdevice.h>
@@ -674,6 +675,7 @@ bnad_cq_process(struct bnad *bnad, struct bna_ccb *ccb, int budget)
 			if (!next_cmpl->valid)
 				break;
 		}
+		packets++;
 
 		/* TODO: BNA_CQ_EF_LOCAL ? */
 		if (unlikely(flags & (BNA_CQ_EF_MAC_ERROR |
@@ -690,7 +692,6 @@ bnad_cq_process(struct bnad *bnad, struct bna_ccb *ccb, int budget)
 		else
 			bnad_cq_setup_skb_frags(rcb, skb, sop_ci, nvecs, len);
 
-		packets++;
 		rcb->rxq->rx_packets++;
 		rcb->rxq->rx_bytes += totlen;
 		ccb->bytes_per_intr += totlen;
@@ -3700,10 +3701,6 @@ bnad_pci_probe(struct pci_dev *pdev,
 	setup_timer(&bnad->bna.ioceth.ioc.sem_timer, bnad_iocpf_sem_timeout,
 				((unsigned long)bnad));
 
-	/* Now start the timer before calling IOC */
-	mod_timer(&bnad->bna.ioceth.ioc.iocpf_timer,
-		  jiffies + msecs_to_jiffies(BNA_IOC_TIMER_FREQ));
-
 	/*
 	 * Start the chip
 	 * If the call back comes with error, we bail out.
@@ -3867,7 +3864,7 @@ bnad_module_init(void)
 {
 	int err;
 
-	pr_info("Brocade 10G Ethernet driver - version: %s\n",
+	pr_info("QLogic BR-series 10G Ethernet driver - version: %s\n",
 			BNAD_VERSION);
 
 	bfa_nw_ioc_auto_recover(bnad_ioc_auto_recover);
@@ -3894,7 +3891,7 @@ module_exit(bnad_module_exit);
 
 MODULE_AUTHOR("Brocade");
 MODULE_LICENSE("GPL");
-MODULE_DESCRIPTION("Brocade 10G PCIe Ethernet driver");
+MODULE_DESCRIPTION("QLogic BR-series 10G PCIe Ethernet driver");
 MODULE_VERSION(BNAD_VERSION);
 MODULE_FIRMWARE(CNA_FW_FILE_CT);
 MODULE_FIRMWARE(CNA_FW_FILE_CT2);

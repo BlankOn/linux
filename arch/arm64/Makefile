@@ -18,6 +18,8 @@ GZFLAGS		:=-9
 KBUILD_DEFCONFIG := defconfig
 
 KBUILD_CFLAGS	+= -mgeneral-regs-only
+KBUILD_CFLAGS	+= $(call cc-option, -mpc-relative-literal-loads)
+
 ifeq ($(CONFIG_CPU_BIG_ENDIAN), y)
 KBUILD_CPPFLAGS	+= -mbig-endian
 AS		+= -EB
@@ -29,6 +31,10 @@ LD		+= -EL
 endif
 
 CHECKFLAGS	+= -D__aarch64__
+
+ifeq ($(CONFIG_ARM64_ERRATUM_843419), y)
+KBUILD_CFLAGS_MODULE	+= -mcmodel=large
+endif
 
 # Default value
 head-y		:= arch/arm64/kernel/head.o
@@ -48,7 +54,7 @@ core-$(CONFIG_KVM) += arch/arm64/kvm/
 core-$(CONFIG_XEN) += arch/arm64/xen/
 core-$(CONFIG_CRYPTO) += arch/arm64/crypto/
 libs-y		:= arch/arm64/lib/ $(libs-y)
-libs-$(CONFIG_EFI_STUB) += drivers/firmware/efi/libstub/
+core-$(CONFIG_EFI_STUB) += $(objtree)/drivers/firmware/efi/libstub/lib.a
 
 # Default target when executing plain make
 KBUILD_IMAGE	:= Image.gz

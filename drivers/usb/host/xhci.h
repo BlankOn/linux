@@ -285,6 +285,7 @@ struct xhci_op_regs {
 #define XDEV_U0		(0x0 << 5)
 #define XDEV_U2		(0x2 << 5)
 #define XDEV_U3		(0x3 << 5)
+#define XDEV_INACTIVE	(0x6 << 5)
 #define XDEV_RESUME	(0xf << 5)
 /* true: port has power (see HCC_PPC) */
 #define PORT_POWER	(1 << 9)
@@ -1129,6 +1130,8 @@ enum xhci_setup_dev {
 /* Normal TRB fields */
 /* transfer_len bitmasks - bits 0:16 */
 #define	TRB_LEN(p)		((p) & 0x1ffff)
+/* TD Size, packets remaining in this TD, bits 21:17 (5 bits, so max 31) */
+#define TRB_TD_SIZE(p)          (min((p), (u32)31) << 17)
 /* Interrupter Target - which MSI-X vector to target the completion event at */
 #define TRB_INTR_TARGET(p)	(((p) & 0x3ff) << 22)
 #define GET_INTR_TARGET(p)	(((p) >> 22) & 0x3ff)
@@ -1267,7 +1270,7 @@ union xhci_trb {
  * since the command ring is 64-byte aligned.
  * It must also be greater than 16.
  */
-#define TRBS_PER_SEGMENT	64
+#define TRBS_PER_SEGMENT	256
 /* Allow two commands + a link TRB, along with any reserved command TRBs */
 #define MAX_RSVD_CMD_TRBS	(TRBS_PER_SEGMENT - 3)
 #define TRB_SEGMENT_SIZE	(TRBS_PER_SEGMENT*16)
@@ -1497,6 +1500,8 @@ struct xhci_hcd {
 	struct list_head	lpm_failed_devs;
 
 	/* slot enabling and address device helpers */
+	/* these are not thread safe so use mutex */
+	struct mutex mutex;
 	struct completion	addr_dev;
 	int slot_id;
 	/* For USB 3.0 LPM enable/disable. */
@@ -1531,6 +1536,7 @@ struct xhci_hcd {
  */
 #define XHCI_STATE_DYING	(1 << 0)
 #define XHCI_STATE_HALTED	(1 << 1)
+#define XHCI_STATE_REMOVING	(1 << 2)
 	/* Statistics */
 	int			error_bitmask;
 	unsigned int		quirks;
@@ -1565,6 +1571,10 @@ struct xhci_hcd {
 /* For controllers with a broken beyond repair streams implementation */
 #define XHCI_BROKEN_STREAMS	(1 << 19)
 #define XHCI_PME_STUCK_QUIRK	(1 << 20)
+/* For controller with a broken Port Disable implementation */
+#define XHCI_BROKEN_PORT_PE	(1 << 21)
+#define XHCI_SSIC_PORT_UNUSED	(1 << 22)
+#define XHCI_NO_64BIT_SUPPORT	(1 << 23)
 	unsigned int		num_active_eps;
 	unsigned int		limit_active_eps;
 	/* There are two roothubs to keep track of bus suspend info for */
@@ -1591,10 +1601,24 @@ struct xhci_hcd {
 #define COMP_MODE_RCVRY_MSECS 2000
 };
 
+/* Platform specific overrides to generic XHCI hc_driver ops */
+struct xhci_driver_overrides {
+	size_t extra_priv_size;
+	int (*reset)(struct usb_hcd *hcd);
+	int (*start)(struct usb_hcd *hcd);
+};
+
 /* convert between an HCD pointer and the corresponding EHCI_HCD */
 static inline struct xhci_hcd *hcd_to_xhci(struct usb_hcd *hcd)
 {
-	return *((struct xhci_hcd **) (hcd->hcd_priv));
+	struct usb_hcd *primary_hcd;
+
+	if (usb_hcd_is_primary_hcd(hcd))
+		primary_hcd = hcd;
+	else
+		primary_hcd = hcd->primary_hcd;
+
+	return (struct xhci_hcd *) (primary_hcd->hcd_priv);
 }
 
 static inline struct usb_hcd *xhci_to_hcd(struct xhci_hcd *xhci)
@@ -1748,7 +1772,8 @@ int xhci_run(struct usb_hcd *hcd);
 void xhci_stop(struct usb_hcd *hcd);
 void xhci_shutdown(struct usb_hcd *hcd);
 int xhci_gen_setup(struct usb_hcd *hcd, xhci_get_quirks_t get_quirks);
-void xhci_init_driver(struct hc_driver *drv, int (*setup_fn)(struct usb_hcd *));
+void xhci_init_driver(struct hc_driver *drv,
+		      const struct xhci_driver_overrides *over);
 
 #ifdef	CONFIG_PM
 int xhci_suspend(struct xhci_hcd *xhci, bool do_wakeup);

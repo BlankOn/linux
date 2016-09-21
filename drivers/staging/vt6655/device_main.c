@@ -807,6 +807,10 @@ static int device_rx_srv(struct vnt_private *pDevice, unsigned int uIdx)
 	     pRD = pRD->next) {
 		if (works++ > 15)
 			break;
+
+		if (!pRD->pRDInfo->skb)
+			break;
+
 		if (vnt_receive_frame(pDevice, pRD)) {
 			if (!device_alloc_rx_buf(pDevice, pRD)) {
 				dev_err(&pDevice->pcid->dev,
@@ -912,7 +916,11 @@ static int vnt_int_report_rate(struct vnt_private *priv,
 
 	if (!(tsr1 & TSR1_TERR)) {
 		info->status.rates[0].idx = idx;
-		info->flags |= IEEE80211_TX_STAT_ACK;
+
+		if (info->flags & IEEE80211_TX_CTL_NO_ACK)
+			info->flags |= IEEE80211_TX_STAT_NOACK_TRANSMITTED;
+		else
+			info->flags |= IEEE80211_TX_STAT_ACK;
 	}
 
 	return 0;
@@ -937,9 +945,6 @@ static int device_tx_srv(struct vnt_private *pDevice, unsigned int uIdx)
 		/* Only the status of first TD in the chain is correct */
 		if (pTD->m_td1TD1.byTCR & TCR_STP) {
 			if ((pTD->pTDInfo->byFlags & TD_FLAGS_NETIF_SKB) != 0) {
-
-				vnt_int_report_rate(pDevice, pTD->pTDInfo, byTsr0, byTsr1);
-
 				if (!(byTsr1 & TSR1_TERR)) {
 					if (byTsr0 != 0) {
 						pr_debug(" Tx[%d] OK but has error. tsr1[%02X] tsr0[%02X]\n",
@@ -958,6 +963,9 @@ static int device_tx_srv(struct vnt_private *pDevice, unsigned int uIdx)
 						 (int)uIdx, byTsr1, byTsr0);
 				}
 			}
+
+			vnt_int_report_rate(pDevice, pTD->pTDInfo, byTsr0, byTsr1);
+
 			device_free_tx_buf(pDevice, pTD);
 			pDevice->iTDUsed[uIdx]--;
 		}
@@ -989,10 +997,8 @@ static void device_free_tx_buf(struct vnt_private *pDevice, PSTxDesc pDesc)
 				 skb->len, DMA_TO_DEVICE);
 	}
 
-	if (pTDInfo->byFlags & TD_FLAGS_NETIF_SKB)
+	if (skb)
 		ieee80211_tx_status_irqsafe(pDevice->hw, skb);
-	else
-		dev_kfree_skb_irq(skb);
 
 	pTDInfo->skb_dma = 0;
 	pTDInfo->skb = NULL;
@@ -1204,14 +1210,6 @@ static int vnt_tx_packet(struct vnt_private *priv, struct sk_buff *skb)
 	if (dma_idx == TYPE_AC0DMA)
 		head_td->pTDInfo->byFlags = TD_FLAGS_NETIF_SKB;
 
-	priv->iTDUsed[dma_idx]++;
-
-	/* Take ownership */
-	wmb();
-	head_td->m_td0TD0.f1Owner = OWNED_BY_NIC;
-
-	/* get Next */
-	wmb();
 	priv->apCurrTD[dma_idx] = head_td->next;
 
 	spin_unlock_irqrestore(&priv->lock, flags);
@@ -1232,10 +1230,17 @@ static int vnt_tx_packet(struct vnt_private *priv, struct sk_buff *skb)
 
 	head_td->buff_addr = cpu_to_le32(head_td->pTDInfo->skb_dma);
 
+	/* Poll Transmit the adapter */
+	wmb();
+	head_td->m_td0TD0.f1Owner = OWNED_BY_NIC;
+	wmb(); /* second memory barrier */
+
 	if (head_td->pTDInfo->byFlags & TD_FLAGS_NETIF_SKB)
 		MACvTransmitAC0(priv->PortOffset);
 	else
 		MACvTransmit0(priv->PortOffset);
+
+	priv->iTDUsed[dma_idx]++;
 
 	spin_unlock_irqrestore(&priv->lock, flags);
 
@@ -1416,8 +1421,15 @@ static void vnt_bss_info_changed(struct ieee80211_hw *hw,
 
 	priv->current_aid = conf->aid;
 
-	if (changed & BSS_CHANGED_BSSID)
+	if (changed & BSS_CHANGED_BSSID && conf->bssid) {
+		unsigned long flags;
+
+		spin_lock_irqsave(&priv->lock, flags);
+
 		MACvWriteBSSIDAddress(priv->PortOffset, (u8 *)conf->bssid);
+
+		spin_unlock_irqrestore(&priv->lock, flags);
+	}
 
 	if (changed & BSS_CHANGED_BASIC_RATES) {
 		priv->basic_rates = conf->basic_rates;
@@ -1474,10 +1486,11 @@ static void vnt_bss_info_changed(struct ieee80211_hw *hw,
 		}
 	}
 
-	if (changed & BSS_CHANGED_ASSOC && priv->op_mode != NL80211_IFTYPE_AP) {
-		if (conf->assoc) {
+	if (changed & (BSS_CHANGED_ASSOC | BSS_CHANGED_BEACON_INFO) &&
+	    priv->op_mode != NL80211_IFTYPE_AP) {
+		if (conf->assoc && conf->beacon_rate) {
 			CARDbUpdateTSF(priv, conf->beacon_rate->hw_value,
-				       conf->sync_device_ts, conf->sync_tsf);
+				       conf->sync_tsf);
 
 			CARDbSetBeaconPeriod(priv, conf->beacon_int);
 

@@ -680,7 +680,6 @@ static int __kvm_set_xcr(struct kvm_vcpu *vcpu, u32 index, u64 xcr)
 		if ((xcr0 & XSTATE_AVX512) != XSTATE_AVX512)
 			return 1;
 	}
-	kvm_put_guest_xcr0(vcpu);
 	vcpu->arch.xcr0 = xcr0;
 
 	if ((xcr0 ^ old_xcr0) & XSTATE_EXTEND_MASK)
@@ -702,8 +701,9 @@ EXPORT_SYMBOL_GPL(kvm_set_xcr);
 int kvm_set_cr4(struct kvm_vcpu *vcpu, unsigned long cr4)
 {
 	unsigned long old_cr4 = kvm_read_cr4(vcpu);
-	unsigned long pdptr_bits = X86_CR4_PGE | X86_CR4_PSE |
-				   X86_CR4_PAE | X86_CR4_SMEP;
+	unsigned long pdptr_bits = X86_CR4_PGE | X86_CR4_PSE | X86_CR4_PAE |
+				   X86_CR4_SMEP | X86_CR4_SMAP;
+
 	if (cr4 & CR4_RESERVED_BITS)
 		return 1;
 
@@ -743,9 +743,6 @@ int kvm_set_cr4(struct kvm_vcpu *vcpu, unsigned long cr4)
 	if (((cr4 ^ old_cr4) & pdptr_bits) ||
 	    (!(cr4 & X86_CR4_PCIDE) && (old_cr4 & X86_CR4_PCIDE)))
 		kvm_mmu_reset_context(vcpu);
-
-	if ((cr4 ^ old_cr4) & X86_CR4_SMAP)
-		update_permission_bitmask(vcpu, vcpu->arch.walk_mmu, false);
 
 	if ((cr4 ^ old_cr4) & X86_CR4_OSXSAVE)
 		kvm_update_cpuid(vcpu);
@@ -942,7 +939,7 @@ static u32 msrs_to_save[] = {
 	MSR_CSTAR, MSR_KERNEL_GS_BASE, MSR_SYSCALL_MASK, MSR_LSTAR,
 #endif
 	MSR_IA32_TSC, MSR_IA32_CR_PAT, MSR_VM_HSAVE_PA,
-	MSR_IA32_FEATURE_CONTROL, MSR_IA32_BNDCFGS
+	MSR_IA32_FEATURE_CONTROL, MSR_IA32_BNDCFGS, MSR_TSC_AUX,
 };
 
 static unsigned num_msrs_to_save;
@@ -1669,12 +1666,28 @@ static int kvm_guest_time_update(struct kvm_vcpu *v)
 		&guest_hv_clock, sizeof(guest_hv_clock))))
 		return 0;
 
-	/*
-	 * The interface expects us to write an even number signaling that the
-	 * update is finished. Since the guest won't see the intermediate
-	 * state, we just increase by 2 at the end.
+	/* This VCPU is paused, but it's legal for a guest to read another
+	 * VCPU's kvmclock, so we really have to follow the specification where
+	 * it says that version is odd if data is being modified, and even after
+	 * it is consistent.
+	 *
+	 * Version field updates must be kept separate.  This is because
+	 * kvm_write_guest_cached might use a "rep movs" instruction, and
+	 * writes within a string instruction are weakly ordered.  So there
+	 * are three writes overall.
+	 *
+	 * As a small optimization, only write the version field in the first
+	 * and third write.  The vcpu->pv_time cache is still valid, because the
+	 * version field is the first in the struct.
 	 */
-	vcpu->hv_clock.version = guest_hv_clock.version + 2;
+	BUILD_BUG_ON(offsetof(struct pvclock_vcpu_time_info, version) != 0);
+
+	vcpu->hv_clock.version = guest_hv_clock.version + 1;
+	kvm_write_guest_cached(v->kvm, &vcpu->pv_time,
+				&vcpu->hv_clock,
+				sizeof(vcpu->hv_clock.version));
+
+	smp_wmb();
 
 	/* retain PVCLOCK_GUEST_STOPPED if set in guest copy */
 	pvclock_flags = (guest_hv_clock.flags & PVCLOCK_GUEST_STOPPED);
@@ -1695,6 +1708,13 @@ static int kvm_guest_time_update(struct kvm_vcpu *v)
 	kvm_write_guest_cached(v->kvm, &vcpu->pv_time,
 				&vcpu->hv_clock,
 				sizeof(vcpu->hv_clock));
+
+	smp_wmb();
+
+	vcpu->hv_clock.version++;
+	kvm_write_guest_cached(v->kvm, &vcpu->pv_time,
+				&vcpu->hv_clock,
+				sizeof(vcpu->hv_clock.version));
 	return 0;
 }
 
@@ -2096,6 +2116,8 @@ static void accumulate_steal_time(struct kvm_vcpu *vcpu)
 
 static void record_steal_time(struct kvm_vcpu *vcpu)
 {
+	accumulate_steal_time(vcpu);
+
 	if (!(vcpu->arch.st.msr_val & KVM_MSR_ENABLED))
 		return;
 
@@ -2171,7 +2193,7 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 		if (guest_cpuid_has_tsc_adjust(vcpu)) {
 			if (!msr_info->host_initiated) {
 				s64 adj = data - vcpu->arch.ia32_tsc_adjust_msr;
-				kvm_x86_ops->adjust_tsc_offset(vcpu, adj, true);
+				adjust_tsc_offset_guest(vcpu, adj);
 			}
 			vcpu->arch.ia32_tsc_adjust_msr = data;
 		}
@@ -2240,12 +2262,6 @@ int kvm_set_msr_common(struct kvm_vcpu *vcpu, struct msr_data *msr_info)
 
 		if (!(data & KVM_MSR_ENABLED))
 			break;
-
-		vcpu->arch.st.last_steal = current->sched_info.run_delay;
-
-		preempt_disable();
-		accumulate_steal_time(vcpu);
-		preempt_enable();
 
 		kvm_make_request(KVM_REQ_STEAL_UPDATE, vcpu);
 
@@ -2945,7 +2961,6 @@ void kvm_arch_vcpu_load(struct kvm_vcpu *vcpu, int cpu)
 		vcpu->cpu = cpu;
 	}
 
-	accumulate_steal_time(vcpu);
 	kvm_make_request(KVM_REQ_STEAL_UPDATE, vcpu);
 }
 
@@ -3157,6 +3172,11 @@ static int kvm_vcpu_ioctl_x86_set_debugregs(struct kvm_vcpu *vcpu,
 					    struct kvm_debugregs *dbgregs)
 {
 	if (dbgregs->flags)
+		return -EINVAL;
+
+	if (dbgregs->dr6 & ~0xffffffffull)
+		return -EINVAL;
+	if (dbgregs->dr7 & ~0xffffffffull)
 		return -EINVAL;
 
 	memcpy(vcpu->arch.db, dbgregs->db, sizeof(vcpu->arch.db));
@@ -3716,13 +3736,13 @@ static int kvm_vm_ioctl_get_pit(struct kvm *kvm, struct kvm_pit_state *ps)
 
 static int kvm_vm_ioctl_set_pit(struct kvm *kvm, struct kvm_pit_state *ps)
 {
-	int r = 0;
-
+	int i;
 	mutex_lock(&kvm->arch.vpit->pit_state.lock);
 	memcpy(&kvm->arch.vpit->pit_state, ps, sizeof(struct kvm_pit_state));
-	kvm_pit_load_count(kvm, 0, ps->channels[0].count, 0);
+	for (i = 0; i < 3; i++)
+		kvm_pit_load_count(kvm, i, ps->channels[i].count, 0);
 	mutex_unlock(&kvm->arch.vpit->pit_state.lock);
-	return r;
+	return 0;
 }
 
 static int kvm_vm_ioctl_get_pit2(struct kvm *kvm, struct kvm_pit_state2 *ps)
@@ -3741,6 +3761,7 @@ static int kvm_vm_ioctl_get_pit2(struct kvm *kvm, struct kvm_pit_state2 *ps)
 static int kvm_vm_ioctl_set_pit2(struct kvm *kvm, struct kvm_pit_state2 *ps)
 {
 	int r = 0, start = 0;
+	int i;
 	u32 prev_legacy, cur_legacy;
 	mutex_lock(&kvm->arch.vpit->pit_state.lock);
 	prev_legacy = kvm->arch.vpit->pit_state.flags & KVM_PIT_FLAGS_HPET_LEGACY;
@@ -3750,7 +3771,8 @@ static int kvm_vm_ioctl_set_pit2(struct kvm *kvm, struct kvm_pit_state2 *ps)
 	memcpy(&kvm->arch.vpit->pit_state.channels, &ps->channels,
 	       sizeof(kvm->arch.vpit->pit_state.channels));
 	kvm->arch.vpit->pit_state.flags = ps->flags;
-	kvm_pit_load_count(kvm, 0, kvm->arch.vpit->pit_state.channels[0].count, start);
+	for (i = 0; i < 3; i++)
+		kvm_pit_load_count(kvm, i, kvm->arch.vpit->pit_state.channels[i].count, start);
 	mutex_unlock(&kvm->arch.vpit->pit_state.lock);
 	return r;
 }
@@ -4096,14 +4118,15 @@ static void kvm_init_msr_list(void)
 
 		/*
 		 * Even MSRs that are valid in the host may not be exposed
-		 * to the guests in some cases.  We could work around this
-		 * in VMX with the generic MSR save/load machinery, but it
-		 * is not really worthwhile since it will really only
-		 * happen with nested virtualization.
+		 * to the guests in some cases.
 		 */
 		switch (msrs_to_save[i]) {
 		case MSR_IA32_BNDCFGS:
 			if (!kvm_x86_ops->mpx_supported())
+				continue;
+			break;
+		case MSR_TSC_AUX:
+			if (!kvm_x86_ops->rdtscp_supported())
 				continue;
 			break;
 		default:
@@ -5792,6 +5815,13 @@ int kvm_arch_init(void *opaque)
 		goto out;
 	}
 
+#ifdef CONFIG_PREEMPT_RT_FULL
+	if (!boot_cpu_has(X86_FEATURE_CONSTANT_TSC)) {
+		printk(KERN_ERR "RT requires X86_FEATURE_CONSTANT_TSC\n");
+		return -EOPNOTSUPP;
+	}
+#endif
+
 	r = kvm_mmu_module_init();
 	if (r)
 		goto out_free_percpu;
@@ -5799,7 +5829,6 @@ int kvm_arch_init(void *opaque)
 	kvm_set_mmio_spte_mask();
 
 	kvm_x86_ops = ops;
-	kvm_init_msr_list();
 
 	kvm_mmu_set_mask_ptes(PT_USER_MASK, PT_ACCESSED_MASK,
 			PT_DIRTY_MASK, PT64_NX_MASK, 0);
@@ -6097,12 +6126,10 @@ static int inject_pending_event(struct kvm_vcpu *vcpu, bool req_int_win)
 	}
 
 	/* try to inject new event if pending */
-	if (vcpu->arch.nmi_pending) {
-		if (kvm_x86_ops->nmi_allowed(vcpu)) {
-			--vcpu->arch.nmi_pending;
-			vcpu->arch.nmi_injected = true;
-			kvm_x86_ops->set_nmi(vcpu);
-		}
+	if (vcpu->arch.nmi_pending && kvm_x86_ops->nmi_allowed(vcpu)) {
+		--vcpu->arch.nmi_pending;
+		vcpu->arch.nmi_injected = true;
+		kvm_x86_ops->set_nmi(vcpu);
 	} else if (kvm_cpu_has_injectable_intr(vcpu)) {
 		/*
 		 * Because interrupts can be injected asynchronously, we are
@@ -6175,6 +6202,8 @@ void kvm_vcpu_reload_apic_access_page(struct kvm_vcpu *vcpu)
 		return;
 
 	page = gfn_to_page(vcpu->kvm, APIC_DEFAULT_PHYS_BASE >> PAGE_SHIFT);
+	if (is_error_page(page))
+		return;
 	kvm_x86_ops->set_apic_access_page_addr(vcpu, page_to_phys(page));
 
 	/*
@@ -6270,10 +6299,12 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		if (inject_pending_event(vcpu, req_int_win) != 0)
 			req_immediate_exit = true;
 		/* enable NMI/IRQ window open exits if needed */
-		else if (vcpu->arch.nmi_pending)
-			kvm_x86_ops->enable_nmi_window(vcpu);
-		else if (kvm_cpu_has_injectable_intr(vcpu) || req_int_win)
-			kvm_x86_ops->enable_irq_window(vcpu);
+		else {
+			if (vcpu->arch.nmi_pending)
+				kvm_x86_ops->enable_nmi_window(vcpu);
+			if (kvm_cpu_has_injectable_intr(vcpu) || req_int_win)
+				kvm_x86_ops->enable_irq_window(vcpu);
+		}
 
 		if (kvm_lapic_enabled(vcpu)) {
 			/*
@@ -6298,8 +6329,6 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	kvm_x86_ops->prepare_guest_switch(vcpu);
 	if (vcpu->fpu_active)
 		kvm_load_guest_fpu(vcpu);
-	kvm_load_guest_xcr0(vcpu);
-
 	vcpu->mode = IN_GUEST_MODE;
 
 	srcu_read_unlock(&vcpu->kvm->srcu, vcpu->srcu_idx);
@@ -6321,6 +6350,8 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 		r = 1;
 		goto cancel_injection;
 	}
+
+	kvm_load_guest_xcr0(vcpu);
 
 	if (req_immediate_exit)
 		smp_send_reschedule(vcpu->cpu);
@@ -6348,12 +6379,12 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 	 * KVM_DEBUGREG_WONT_EXIT again.
 	 */
 	if (unlikely(vcpu->arch.switch_db_regs & KVM_DEBUGREG_WONT_EXIT)) {
-		int i;
-
 		WARN_ON(vcpu->guest_debug & KVM_GUESTDBG_USE_HW_BP);
 		kvm_x86_ops->sync_dirty_debug_regs(vcpu);
-		for (i = 0; i < KVM_NR_DB_REGS; i++)
-			vcpu->arch.eff_db[i] = vcpu->arch.db[i];
+		kvm_update_dr0123(vcpu);
+		kvm_update_dr6(vcpu);
+		kvm_update_dr7(vcpu);
+		vcpu->arch.switch_db_regs &= ~KVM_DEBUGREG_RELOAD;
 	}
 
 	/*
@@ -6371,6 +6402,8 @@ static int vcpu_enter_guest(struct kvm_vcpu *vcpu)
 
 	vcpu->mode = OUTSIDE_GUEST_MODE;
 	smp_wmb();
+
+	kvm_put_guest_xcr0(vcpu);
 
 	/* Interrupt is enabled by handle_external_intr() */
 	kvm_x86_ops->handle_external_intr(vcpu);
@@ -7020,7 +7053,6 @@ void kvm_load_guest_fpu(struct kvm_vcpu *vcpu)
 	 * and assume host would use all available bits.
 	 * Guest xcr0 would be loaded later.
 	 */
-	kvm_put_guest_xcr0(vcpu);
 	vcpu->guest_fpu_loaded = 1;
 	__kernel_fpu_begin();
 	fpu_restore_checking(&vcpu->arch.guest_fpu);
@@ -7029,8 +7061,6 @@ void kvm_load_guest_fpu(struct kvm_vcpu *vcpu)
 
 void kvm_put_guest_fpu(struct kvm_vcpu *vcpu)
 {
-	kvm_put_guest_xcr0(vcpu);
-
 	if (!vcpu->guest_fpu_loaded)
 		return;
 
@@ -7038,7 +7068,9 @@ void kvm_put_guest_fpu(struct kvm_vcpu *vcpu)
 	fpu_save_init(&vcpu->arch.guest_fpu);
 	__kernel_fpu_end();
 	++vcpu->stat.fpu_reload;
-	kvm_make_request(KVM_REQ_DEACTIVATE_FPU, vcpu);
+	if (!vcpu->arch.eager_fpu)
+		kvm_make_request(KVM_REQ_DEACTIVATE_FPU, vcpu);
+
 	trace_kvm_fpu(0);
 }
 
@@ -7054,11 +7086,21 @@ void kvm_arch_vcpu_free(struct kvm_vcpu *vcpu)
 struct kvm_vcpu *kvm_arch_vcpu_create(struct kvm *kvm,
 						unsigned int id)
 {
+	struct kvm_vcpu *vcpu;
+
 	if (check_tsc_unstable() && atomic_read(&kvm->online_vcpus) != 0)
 		printk_once(KERN_WARNING
 		"kvm: SMP vm created on host with unstable TSC; "
 		"guest TSC will not be reliable\n");
-	return kvm_x86_ops->vcpu_create(kvm, id);
+
+	vcpu = kvm_x86_ops->vcpu_create(kvm, id);
+
+	/*
+	 * Activate fpu unconditionally in case the guest needs eager FPU.  It will be
+	 * deactivated soon if it doesn't.
+	 */
+	kvm_x86_ops->fpu_activate(vcpu);
+	return vcpu;
 }
 
 int kvm_arch_vcpu_setup(struct kvm_vcpu *vcpu)
@@ -7253,7 +7295,14 @@ void kvm_arch_hardware_disable(void)
 
 int kvm_arch_hardware_setup(void)
 {
-	return kvm_x86_ops->hardware_setup();
+	int r;
+
+	r = kvm_x86_ops->hardware_setup();
+	if (r != 0)
+		return r;
+
+	kvm_init_msr_list();
+	return 0;
 }
 
 void kvm_arch_hardware_unsetup(void)

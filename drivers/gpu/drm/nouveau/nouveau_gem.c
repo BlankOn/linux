@@ -189,6 +189,9 @@ nouveau_gem_new(struct drm_device *dev, int size, int align, uint32_t domain,
 	if (!flags || domain & NOUVEAU_GEM_DOMAIN_CPU)
 		flags |= TTM_PL_FLAG_SYSTEM;
 
+	if (domain & NOUVEAU_GEM_DOMAIN_COHERENT)
+		flags |= TTM_PL_FLAG_UNCACHED;
+
 	ret = nouveau_bo_new(dev, size, align, flags, tile_mode,
 			     tile_flags, NULL, NULL, pnvbo);
 	if (ret)
@@ -224,11 +227,12 @@ nouveau_gem_info(struct drm_file *file_priv, struct drm_gem_object *gem,
 	struct nouveau_bo *nvbo = nouveau_gem_object(gem);
 	struct nvkm_vma *vma;
 
-	if (nvbo->bo.mem.mem_type == TTM_PL_TT)
+	if (is_power_of_2(nvbo->valid_domains))
+		rep->domain = nvbo->valid_domains;
+	else if (nvbo->bo.mem.mem_type == TTM_PL_TT)
 		rep->domain = NOUVEAU_GEM_DOMAIN_GART;
 	else
 		rep->domain = NOUVEAU_GEM_DOMAIN_VRAM;
-
 	rep->offset = nvbo->bo.offset;
 	if (cli->vm) {
 		vma = nouveau_bo_vma_find(nvbo, cli->vm);

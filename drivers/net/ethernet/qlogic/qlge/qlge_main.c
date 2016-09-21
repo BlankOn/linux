@@ -460,7 +460,7 @@ static int ql_set_mac_addr(struct ql_adapter *qdev, int set)
 		netif_printk(qdev, ifup, KERN_DEBUG, qdev->ndev,
 			     "Set Mac addr %pM\n", addr);
 	} else {
-		memset(zero_mac_addr, 0, ETH_ALEN);
+		eth_zero_addr(zero_mac_addr);
 		addr = &zero_mac_addr[0];
 		netif_printk(qdev, ifup, KERN_DEBUG, qdev->ndev,
 			     "Clearing MAC address\n");
@@ -1648,7 +1648,18 @@ static void ql_process_mac_rx_skb(struct ql_adapter *qdev,
 		return;
 	}
 	skb_reserve(new_skb, NET_IP_ALIGN);
+
+	pci_dma_sync_single_for_cpu(qdev->pdev,
+				    dma_unmap_addr(sbq_desc, mapaddr),
+				    dma_unmap_len(sbq_desc, maplen),
+				    PCI_DMA_FROMDEVICE);
+
 	memcpy(skb_put(new_skb, length), skb->data, length);
+
+	pci_dma_sync_single_for_device(qdev->pdev,
+				       dma_unmap_addr(sbq_desc, mapaddr),
+				       dma_unmap_len(sbq_desc, maplen),
+				       PCI_DMA_FROMDEVICE);
 	skb = new_skb;
 
 	/* Frame error, so drop the packet. */
